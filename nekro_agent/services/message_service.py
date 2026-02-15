@@ -10,6 +10,7 @@ import magic
 from nekro_agent.adapters.interface.schemas.extra import PlatformMessageExt
 from nekro_agent.adapters.interface.schemas.platform import PlatformSendResponse
 from nekro_agent.adapters.utils import adapter_utils
+from nekro_agent.core.config import config as core_config
 from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
@@ -23,6 +24,7 @@ from nekro_agent.schemas.agent_message import (
 from nekro_agent.schemas.chat_message import ChatMessage
 from nekro_agent.schemas.signal import MsgSignal
 from nekro_agent.services.plugin.collector import plugin_collector
+from nekro_agent.services.quota_service import quota_service
 from nekro_agent.tools.common_util import (
     check_content_trigger,
     check_forbidden_message,
@@ -225,6 +227,28 @@ class MessageService:
                 logger.info(f"聊天频道 {message.chat_key} 已被禁用，跳过本次处理...")
                 return
 
+            # 检查每日回复数量限制（系统超管和白名单用户不受限制）
+            if (
+                config.AI_CHAT_DAILY_REPLY_LIMIT > 0
+                and message.sender_id not in core_config.SUPER_USERS
+                and message.sender_id not in core_config.AI_CHAT_DAILY_REPLY_WHITELIST_USERS
+            ):
+                daily_count = await DBChatMessage.get_daily_bot_reply_count(message.chat_key)
+                effective_limit = config.AI_CHAT_DAILY_REPLY_LIMIT + quota_service.get_boost(message.chat_key)
+                if daily_count >= effective_limit:
+                    logger.info(
+                        f"聊天频道 {message.chat_key} 今日回复数量已达上限 {effective_limit}，跳过本次处理...",
+                    )
+                    from nekro_agent.services.chat.universal_chat_service import (
+                        universal_chat_service,
+                    )
+
+                    await universal_chat_service.send_operation_message(
+                        chat_key=message.chat_key,
+                        message=f"今日回复数量已达上限 ({daily_count}/{effective_limit})，明天再来吧~",
+                    )
+                    return
+
             if signal not in [MsgSignal.CONTINUE, MsgSignal.FORCE_TRIGGER]:
                 logger.info(f"用户消息 {message.content_text} 被插件阻止触发，跳过本次处理...")
                 return
@@ -345,6 +369,9 @@ class MessageService:
             if not db_chat_channel.is_active:
                 logger.info(f"聊天频道 {chat_key} 已被禁用，跳过本次处理...")
                 return
+
+            # 系统消息触发的回复不受配额限制
+
             if signal not in [MsgSignal.CONTINUE, MsgSignal.FORCE_TRIGGER]:
                 logger.info(f"系统消息 {content_text} 被插件阻止触发，跳过本次处理...")
                 return

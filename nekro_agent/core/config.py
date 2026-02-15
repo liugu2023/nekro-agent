@@ -681,6 +681,38 @@ class CoreConfig(ConfigBase):
     )
 
     """聊天设置"""
+    AI_CHAT_DAILY_REPLY_LIMIT: int = Field(
+        default=0,
+        title="每日回复数量上限",
+        description="每个聊天频道每日 Bot 回复的数量上限，0 表示不限制",
+        json_schema_extra=ExtraField(
+            overridable=True,
+            i18n_title=i18n_text(
+                zh_CN="每日回复数量上限",
+                en_US="Daily Reply Limit",
+            ),
+            i18n_description=i18n_text(
+                zh_CN="每个聊天频道每日 Bot 回复的数量上限，0 表示不限制",
+                en_US="Daily bot reply limit per channel, 0 means no limit",
+            ),
+        ).model_dump(),
+    )
+    AI_CHAT_DAILY_REPLY_WHITELIST_USERS: List[str] = Field(
+        default=[],
+        title="配额白名单用户",
+        description="不受每日回复数量限制的用户 ID 列表，这些用户的消息不受配额限制",
+        json_schema_extra=ExtraField(
+            sub_item_name="用户ID",
+            i18n_title=i18n_text(
+                zh_CN="配额白名单用户",
+                en_US="Quota Whitelist Users",
+            ),
+            i18n_description=i18n_text(
+                zh_CN="不受每日回复数量限制的用户 ID 列表，这些用户的消息不受配额限制",
+                en_US="User IDs not subject to daily reply limit",
+            ),
+        ).model_dump(),
+    )
     SESSION_GROUP_ACTIVE_DEFAULT: bool = Field(
         default=True,
         title="新群聊默认启用聊天",

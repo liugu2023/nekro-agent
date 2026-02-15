@@ -30,9 +30,11 @@ from nekro_agent.models.db_exec_code import DBExecCode
 from nekro_agent.schemas.chat_message import ChatType
 from nekro_agent.services.agent.openai import OpenAIResponse, gen_openai_chat_response
 from nekro_agent.services.agent.resolver import ParsedCodeRunData
+from nekro_agent.services.config_service import UnifiedConfigService
 from nekro_agent.services.message_service import message_service
 from nekro_agent.services.plugin.collector import plugin_collector
 from nekro_agent.services.plugin.schema import SandboxMethodType
+from nekro_agent.services.quota_service import quota_service
 from nekro_agent.services.sandbox.runner import limited_run_code
 from nekro_agent.systems.cloud.api.auth import check_official_repos_starred
 from nekro_agent.systems.cloud.api.telemetry import send_telemetry_report
@@ -571,6 +573,14 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
             "reset <chat_key?>: 清空指定聊天的聊天记录\n"
             "na_on <chat_key?>/<*>: 开启指定聊天的聊天功能\n"
             "na_off <chat_key?>/<*>: 关闭指定聊天的聊天功能\n"
+            "\n====== [配额管理] ======\n"
+            "quota [chat_key]: 查看频道配额状态\n"
+            "quota_boost <数量> [chat_key]: 临时提升今日配额\n"
+            "quota_set <数量> [chat_key]: 永久设置频道配额\n"
+            "quota_reset [chat_key]: 重置为系统默认配额\n"
+            "quota_whitelist: 查看配额白名单用户\n"
+            "quota_whitelist_add <用户ID>: 添加用户到白名单\n"
+            "quota_whitelist_del <用户ID>: 从白名单删除用户\n"
             "\n====== [插件系统] ======\n"
             "na_plugins: 查看当前已加载的插件及其详细信息\n"
             "plugin_info <name/key>: 查看指定插件的详细信息\n"
@@ -1052,6 +1062,227 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
             f"运行环境: {'Docker容器' if is_running_in_docker() else '本地环境'}\n"
             f"NekroCloud: {'已启用' if config.ENABLE_NEKRO_CLOUD else '未启用'}\n"
         ),
+    )
+
+
+# ====== 配额管理命令 ======
+@on_command("quota", aliases={"quota_info", "quota-info"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """查看当前频道的配额状态"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    target_chat_key: str = cmd_content or chat_key
+    db_chat_channel: DBChatChannel = await DBChatChannel.get_channel(chat_key=target_chat_key)
+    effective_config = await db_chat_channel.get_effective_config()
+
+    # 每日回复统计
+    daily_bot_count = await DBChatMessage.get_daily_bot_reply_count(target_chat_key)
+    daily_all_count = await DBChatMessage.get_daily_all_msg_count(target_chat_key)
+    daily_limit = effective_config.AI_CHAT_DAILY_REPLY_LIMIT
+    temp_boost = quota_service.get_boost(target_chat_key)
+    effective_limit = daily_limit + temp_boost if daily_limit > 0 else 0
+
+    # 当前会话消息统计
+    conv_start_ts = int(db_chat_channel.conversation_start_time.timestamp())
+    conv_msg_count = await DBChatMessage.get_conversation_msg_count(target_chat_key, conv_start_ts)
+    context_limit = effective_config.AI_CHAT_CONTEXT_MAX_LENGTH
+
+    # 构建输出
+    lines = [
+        f"[频道配额状态] {target_chat_key}",
+        "",
+        "===== 每日回复配额 =====",
+        f"今日 Bot 回复: {daily_bot_count}",
+        f"今日总消息数: {daily_all_count}",
+    ]
+
+    if daily_limit > 0:
+        remaining = max(0, effective_limit - daily_bot_count)
+        lines.append(f"配置限额: {daily_limit}")
+        if temp_boost > 0:
+            lines.append(f"临时提升: +{temp_boost}")
+        lines.append(f"有效限额: {effective_limit}")
+        lines.append(f"剩余额度: {remaining}")
+    else:
+        lines.append("配置限额: 无限制")
+
+    lines.extend([
+        "",
+        "===== 会话上下文 =====",
+        f"当前会话消息数: {conv_msg_count}",
+        f"上下文最大条数: {context_limit}",
+    ])
+
+    await finish_with(matcher, message="\n".join(lines))
+
+
+@on_command("quota_boost", aliases={"quota-boost"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """临时提升今日配额（仅当天有效，重启失效）"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    args = cmd_content.strip().split()
+    if not args:
+        await finish_with(matcher, message="请指定提升数量: quota_boost <数量> [chat_key]")
+
+    try:
+        amount = int(args[0])
+    except ValueError:
+        await finish_with(matcher, message="提升数量必须是整数")
+
+    target_chat_key = args[1] if len(args) > 1 else chat_key
+    db_chat_channel = await DBChatChannel.get_channel(chat_key=target_chat_key)
+    effective_config = await db_chat_channel.get_effective_config()
+
+    if effective_config.AI_CHAT_DAILY_REPLY_LIMIT <= 0:
+        await finish_with(matcher, message=f"频道 {target_chat_key} 未启用每日限额，无需提升")
+
+    new_total = quota_service.add_boost(target_chat_key, amount)
+    effective_limit = effective_config.AI_CHAT_DAILY_REPLY_LIMIT + new_total
+
+    await finish_with(
+        matcher,
+        message=f"已为频道 {target_chat_key} 临时提升今日配额 +{amount}\n"
+        f"当前临时提升总量: {new_total}\n"
+        f"今日有效限额: {effective_limit}\n"
+        f"(临时提升将在次日或重启后失效)",
+    )
+
+
+@on_command("quota_set", aliases={"quota-set"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """永久设置频道配额（覆盖系统配置）"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    args = cmd_content.strip().split()
+    if not args:
+        await finish_with(matcher, message="请指定配额数量: quota_set <数量> [chat_key]\n设为 0 表示不限制")
+
+    try:
+        amount = int(args[0])
+    except ValueError:
+        await finish_with(matcher, message="配额数量必须是整数")
+
+    target_chat_key = args[1] if len(args) > 1 else chat_key
+    config_key = f"channel_config_{target_chat_key}"
+
+    try:
+        # 启用覆盖并设置值
+        UnifiedConfigService.set_config_value(config_key, "enable_AI_CHAT_DAILY_REPLY_LIMIT", "true")
+        UnifiedConfigService.set_config_value(config_key, "AI_CHAT_DAILY_REPLY_LIMIT", str(amount))
+        UnifiedConfigService.save_config(config_key)
+
+        # 清除缓存的 effective_config
+        db_chat_channel = await DBChatChannel.get_channel(chat_key=target_chat_key)
+        db_chat_channel._effective_config = None  # noqa: SLF001
+    except Exception as e:
+        await finish_with(matcher, message=f"设置失败: {e}")
+
+    limit_str = str(amount) if amount > 0 else "无限制"
+    await finish_with(
+        matcher,
+        message=f"已为频道 {target_chat_key} 永久设置每日配额: {limit_str}\n"
+        f"(此设置将覆盖系统默认配置)",
+    )
+
+
+@on_command("quota_reset", aliases={"quota-reset"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """重置频道配额为系统默认值"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    target_chat_key = cmd_content.strip() or chat_key
+    config_key = f"channel_config_{target_chat_key}"
+
+    try:
+        # 禁用覆盖
+        UnifiedConfigService.set_config_value(config_key, "enable_AI_CHAT_DAILY_REPLY_LIMIT", "false")
+        UnifiedConfigService.save_config(config_key)
+
+        # 清除临时提升
+        quota_service.clear_boost(target_chat_key)
+
+        # 清除缓存的 effective_config
+        db_chat_channel = await DBChatChannel.get_channel(chat_key=target_chat_key)
+        db_chat_channel._effective_config = None  # noqa: SLF001
+    except Exception as e:
+        await finish_with(matcher, message=f"重置失败: {e}")
+
+    await finish_with(
+        matcher,
+        message=f"已重置频道 {target_chat_key} 的配额设置\n"
+        f"当前使用系统默认值: {config.AI_CHAT_DAILY_REPLY_LIMIT}",
+    )
+
+
+@on_command("quota_whitelist", aliases={"quota-whitelist", "qwl"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """查看配额白名单用户列表"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    whitelist = config.AI_CHAT_DAILY_REPLY_WHITELIST_USERS
+    if not whitelist:
+        await finish_with(matcher, message="配额白名单为空\n使用 quota_whitelist_add <用户ID> 添加用户")
+
+    lines = ["[配额白名单用户列表]", f"共 {len(whitelist)} 个用户:"]
+    for i, user_id in enumerate(whitelist, 1):
+        lines.append(f"{i}. {user_id}")
+
+    lines.append("\n使用 quota_whitelist_add <用户ID> 添加用户")
+    lines.append("使用 quota_whitelist_del <用户ID> 删除用户")
+
+    await finish_with(matcher, message="\n".join(lines))
+
+
+@on_command("quota_whitelist_add", aliases={"quota-whitelist-add", "qwl_add", "qwl-add"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """添加用户到配额白名单"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    if not cmd_content.strip():
+        await finish_with(matcher, message="请指定要添加的用户ID: quota_whitelist_add <用户ID>")
+
+    user_id = cmd_content.strip()
+
+    if user_id in config.AI_CHAT_DAILY_REPLY_WHITELIST_USERS:
+        await finish_with(matcher, message=f"用户 {user_id} 已在白名单中")
+
+    try:
+        config.AI_CHAT_DAILY_REPLY_WHITELIST_USERS.append(user_id)
+        save_config()
+    except Exception as e:
+        await finish_with(matcher, message=f"添加失败: {e}")
+
+    await finish_with(
+        matcher,
+        message=f"已将用户 {user_id} 添加到配额白名单\n"
+        f"当前白名单共 {len(config.AI_CHAT_DAILY_REPLY_WHITELIST_USERS)} 个用户",
+    )
+
+
+@on_command("quota_whitelist_del", aliases={"quota-whitelist-del", "qwl_del", "qwl-del"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """从配额白名单删除用户"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    if not cmd_content.strip():
+        await finish_with(matcher, message="请指定要删除的用户ID: quota_whitelist_del <用户ID>")
+
+    user_id = cmd_content.strip()
+
+    if user_id not in config.AI_CHAT_DAILY_REPLY_WHITELIST_USERS:
+        await finish_with(matcher, message=f"用户 {user_id} 不在白名单中")
+
+    try:
+        config.AI_CHAT_DAILY_REPLY_WHITELIST_USERS.remove(user_id)
+        save_config()
+    except Exception as e:
+        await finish_with(matcher, message=f"删除失败: {e}")
+
+    await finish_with(
+        matcher,
+        message=f"已将用户 {user_id} 从配额白名单移除\n"
+        f"当前白名单共 {len(config.AI_CHAT_DAILY_REPLY_WHITELIST_USERS)} 个用户",
     )
 
 

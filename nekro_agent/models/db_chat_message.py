@@ -23,7 +23,7 @@ class DBChatMessage(Model):
     """数据库聊天消息模型"""
 
     id = fields.IntField(pk=True, generated=True, description="ID")
-    sender_id = fields.CharField(max_length=128, index=True, description="发送者 ID") # -1 表示 Bot 发送的消息
+    sender_id = fields.CharField(max_length=128, index=True, description="发送者 ID")  # -1 表示 Bot 发送的消息
     sender_name = fields.CharField(max_length=128, index=True, description="发送者真实昵称")
     sender_nickname = fields.CharField(max_length=128, index=True, description="发送者显示昵称")
     is_tome = fields.IntField(description="是否与 Bot 相关")
@@ -80,8 +80,50 @@ class DBChatMessage(Model):
         except Exception:
             return PlatformMessageExt()
 
+    @classmethod
+    async def get_daily_bot_reply_count(cls, chat_key: str) -> int:
+        """获取当日该频道的 Bot 回复数量（不含 SYSTEM 消息）"""
+        today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_timestamp = int(today_start.timestamp())
 
-def convert_raw_msg_data_json_to_msg_prompt(json_data: str, one_time_code: str, config: "CoreConfig", travel_mode: bool = False) -> str:
+        count = (
+            await cls.filter(
+                chat_key=chat_key,
+                sender_id="-1",
+                send_timestamp__gte=today_start_timestamp,
+            )
+            .exclude(sender_name="SYSTEM")
+            .count()
+        )
+
+        return count
+
+    @classmethod
+    async def get_daily_all_msg_count(cls, chat_key: str) -> int:
+        """获取当日该频道的所有消息数量（含用户和 Bot）"""
+        today_start = datetime.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_timestamp = int(today_start.timestamp())
+
+        return await cls.filter(
+            chat_key=chat_key,
+            send_timestamp__gte=today_start_timestamp,
+        ).count()
+
+    @classmethod
+    async def get_conversation_msg_count(cls, chat_key: str, conversation_start_timestamp: int) -> int:
+        """获取当前会话的消息总数"""
+        return await cls.filter(
+            chat_key=chat_key,
+            send_timestamp__gte=conversation_start_timestamp,
+        ).count()
+
+
+def convert_raw_msg_data_json_to_msg_prompt(
+    json_data: str,
+    one_time_code: str,
+    config: "CoreConfig",
+    travel_mode: bool = False,
+) -> str:
     """将数据库保存的原始消息数据 JSON 转换为提示词字符串
 
     Args:
@@ -116,11 +158,7 @@ def convert_raw_msg_data_json_to_msg_prompt(json_data: str, one_time_code: str, 
             )
         elif isinstance(seg, ChatMessageSegmentJsonCard):
             # JSON卡片消息：直接使用格式化后的文本，已经包含所有关键信息
-            prompt_str += (
-                f"{seg.text}"
-                if travel_mode
-                else f"<{one_time_code} | {seg.text}>"
-            )
+            prompt_str += f"{seg.text}" if travel_mode else f"<{one_time_code} | {seg.text}>"
         elif isinstance(seg, ChatMessageSegment):
             prompt_str += seg.text
 
