@@ -190,3 +190,6 @@ nekro_agent_doc
 
 # .cursor Drafts
 .cursor/drafts
+
+# uv
+uv.lock
