@@ -330,27 +330,22 @@ class AgentCtx(BaseModel):
             >>> logger.info(f"生效人设名称: {preset.title}")  # 总是有值
         """
 
-        if preset_id == -1:
-            # 返回默认人设，使用当前聊天频道的默认人设逻辑
-            if self._db_chat_channel:
-                return await self._db_chat_channel.get_preset()
-            # 如果没有聊天频道上下文，返回系统默认人设
-
-            from nekro_agent.models.db_chat_channel import DefaultPreset
-
-            return DefaultPreset(
-                name=config.AI_CHAT_PRESET_NAME,
-                content=config.AI_CHAT_PRESET_SETTING,
-            )
-
         # 尝试获取指定的人设
-        preset = await DBPreset.get_or_none(id=preset_id)
-        if preset:
-            return preset
+        if preset_id != -1:
+            preset = await DBPreset.get_or_none(id=preset_id)
+            if preset:
+                return preset
+            # 指定ID不存在，fallthrough到默认逻辑
 
-        # 如果指定的人设不存在，也返回默认人设
+        # 获取默认人设（统一入口）
         if self._db_chat_channel:
             return await self._db_chat_channel.get_preset()
+
+        # 无频道上下文的降级处理
+        # 使用 filter().first() 避免 MultipleObjectsReturned 异常
+        system_preset = await DBPreset.filter(author="__system__").first()
+        if system_preset:
+            return system_preset
 
         from nekro_agent.models.db_chat_channel import DefaultPreset
 

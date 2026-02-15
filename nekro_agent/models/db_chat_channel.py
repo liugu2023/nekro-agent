@@ -136,6 +136,12 @@ class DBChatChannel(Model):
         """获取人设"""
         preset = await DBPreset.get_or_none(id=self.preset_id)
         if not preset:
+            # 如果频道未配置人设，使用系统默认人设
+            # 使用 filter().first() 避免 MultipleObjectsReturned 异常
+            system_preset = await DBPreset.filter(author="__system__").first()
+            if system_preset:
+                return system_preset
+            # 降级处理：如果系统默认人设不存在，使用旧配置
             return DefaultPreset(name=config.AI_CHAT_PRESET_NAME, content=config.AI_CHAT_PRESET_SETTING)
         return preset
 

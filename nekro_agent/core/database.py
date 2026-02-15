@@ -53,6 +53,10 @@ async def init_db():
     DB_INITED = True
     logger.success("Nekro Agent 数据库初始化成功 =^_^=")
 
+    # 执行人设配置迁移
+    from nekro_agent.core.preset_migration import migrate_preset_config
+    await migrate_preset_config()
+
 
 async def reset_db(table_name: str = ""):
     """重置数据库
