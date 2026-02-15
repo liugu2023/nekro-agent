@@ -7,7 +7,7 @@ from typing import List, Union
 from nekro_agent.core import logger
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.services.message_service import message_service
-from nekro_agent.services.timer_service import timer_service
+from nekro_agent.services.timer.timer_service import timer_service
 
 from .festivals import (
     CHINESE_TRADITIONAL_FESTIVALS,

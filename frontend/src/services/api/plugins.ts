@@ -281,7 +281,7 @@ export const pluginsApi = {
   }> => {
     try {
       const response = await axios.post('/plugins/reload-all')
-      if (response.data.code !== 200) {
+      if (!response.data.ok) {
         return { success: false, errorMsg: response.data.msg || '重新加载失败' }
       }
       return { success: true, data: response.data.data }

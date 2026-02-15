@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from nekro_agent.models.db_plugin_data import DBPluginData
 from nekro_agent.models.db_user import DBUser
+from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.schemas.errors import NotFoundError, PluginLoadError, PluginNotFoundError
 from nekro_agent.services.plugin.collector import plugin_collector
 from nekro_agent.services.plugin.manager import (
@@ -16,6 +17,8 @@ from nekro_agent.services.plugin.manager import (
 )
 from nekro_agent.services.user.deps import get_current_active_user
 from nekro_agent.services.user.perm import Role, require_role
+
+logger = get_sub_logger("plugins")
 
 router = APIRouter(prefix="/plugins", tags=["Plugins"])
 
@@ -80,6 +83,12 @@ class PluginRouteVerifyResponse(BaseModel):
     plugin_key: str
     found_routes: list[dict]
     routes_count: int
+
+
+class ReloadAllResponse(BaseModel):
+    ok: bool
+    msg: str
+    data: dict | None = None
 
 
 @router.get("/list", summary="获取插件列表", response_model=List[dict])
@@ -262,9 +271,9 @@ async def verify_plugin_routes_endpoint(
     )
 
 
-@router.post("/reload-all", summary="强制重新加载所有插件")
+@router.post("/reload-all", summary="强制重新加载所有插件", response_model=ReloadAllResponse)
 @require_role(Role.Admin)
-async def reload_all_plugins(_current_user: DBUser = Depends(get_current_active_user)) -> Ret:
+async def reload_all_plugins(_current_user: DBUser = Depends(get_current_active_user)) -> ReloadAllResponse:
     """强制重新加载所有插件（管理员专用）
 
     此操作会：
@@ -296,7 +305,8 @@ async def reload_all_plugins(_current_user: DBUser = Depends(get_current_active_
         after_count = len(plugin_collector.loaded_plugins)
         after_failed_count = len(plugin_collector.failed_plugins)
 
-        return Ret.success(
+        return ReloadAllResponse(
+            ok=True,
             msg="所有插件重新加载完成",
             data={
                 "before_loaded": before_count,
@@ -309,4 +319,4 @@ async def reload_all_plugins(_current_user: DBUser = Depends(get_current_active_
         )
     except Exception as e:
         logger.exception(f"重新加载所有插件失败: {e}")
-        return Ret.error(msg=f"重新加载失败: {e!s}")
+        return ReloadAllResponse(ok=False, msg=f"重新加载失败: {e!s}")

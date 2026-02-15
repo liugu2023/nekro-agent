@@ -37,7 +37,7 @@ from nekro_agent.tools.telemetry_util import generate_instance_id
 router = APIRouter(prefix="/presets", tags=["Presets"])
 
 
-<<<<<<< HEAD
+
 class TagInfo(BaseModel):
     tag: str
     count: int
