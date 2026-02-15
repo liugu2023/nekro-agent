@@ -39,6 +39,43 @@ from .templates.system import SystemPrompt
 logger = get_sub_logger("agent_runtime")
 RECENT_ERR_LOGS = deque(maxlen=100)
 
+# Agent 返回结果的标记前缀
+AGENT_RESPONSE_MARKER = "[Agent Method Response]"
+# 文档查询的特殊标记（此类返回在迭代周期内保留，不清理）
+DOC_QUERY_MARKER = "[DOC_QUERY]"
+
+
+def _cleanup_agent_response(messages: List[OpenAIChatMessage]) -> List[OpenAIChatMessage]:
+    """清理上一轮的 Agent 返回结果
+
+    Agent 方法的返回值只需要在当次迭代中可见，后续迭代不再需要，
+    清理掉可以避免 token 累积。
+
+    例外：带有 DOC_QUERY_MARKER 标记的返回（如文档查询）在整个迭代周期内保留，
+    方便 AI 在调试代码时参考。
+
+    Args:
+        messages: 消息列表
+
+    Returns:
+        清理后的消息列表
+    """
+    cleaned = []
+    for msg in messages:
+        # 检查消息内容是否包含 Agent 返回结果标记
+        if msg.role == "user" and msg.content:
+            should_skip = False
+            for segment in msg.content:
+                text = segment.get("text", "") if segment.get("type") == "text" else ""
+                # 如果包含 Agent 返回标记，但不包含文档查询标记，则跳过（清理）
+                if AGENT_RESPONSE_MARKER in text and DOC_QUERY_MARKER not in text:
+                    should_skip = True
+                    break
+            if should_skip:
+                continue
+        cleaned.append(msg)
+    return cleaned
+
 
 @weave.op(name="run_agent")
 async def run_agent(
@@ -145,6 +182,11 @@ async def run_agent(
     parsed_code_data: ParsedCodeRunData = parse_chat_response(llm_response.response_content)
 
     for i in range(config.AI_SCRIPT_MAX_RETRY_TIMES):
+        # 清理上一轮的 Agent 返回结果，避免 token 累积
+        # Agent 返回值只在当次迭代可见，下次迭代不再需要
+        if i > 0:
+            messages = _cleanup_agent_response(messages)
+
         addition_prompt_message: List[OpenAIChatMessage] = []
         sandbox_output = ""
         raw_output = ""

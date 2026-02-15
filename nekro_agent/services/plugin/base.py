@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import re
 from pathlib import Path
 from types import ModuleType
@@ -227,11 +228,12 @@ class NekroPlugin:
 
     def get_plugin_path(self) -> Path:
         """获取插件路径
-        
-        .. deprecated:: 
+
+        .. deprecated::
             使用 get_plugin_data_dir() 代替，语义更明确
         """
         import warnings
+
         warnings.warn(
             "get_plugin_path() 已弃用，请使用 get_plugin_data_dir() 代替",
             DeprecationWarning,
@@ -239,16 +241,16 @@ class NekroPlugin:
         )
         self._plugin_path.mkdir(parents=True, exist_ok=True)
         return self._plugin_path
-    
+
     def get_plugin_data_dir(self) -> Path:
         """获取插件数据目录
-        
+
         返回插件专属的数据存储目录，用于存储插件的运行时数据、日志、缓存等。
         目录位于 DATA_DIR/plugin_data/{author}.{module_name}/
-        
+
         Returns:
             Path: 插件数据目录的 Path 对象，目录会自动创建
-            
+
         Example:
             ```python
             data_dir = plugin.get_plugin_data_dir()
@@ -451,17 +453,17 @@ class NekroPlugin:
         self,
     ) -> Callable[[Callable[..., Coroutine[Any, Any, Any]]], Callable[..., Coroutine[Any, Any, Any]]]:
         """挂载清理方法
-    
+
         用于挂载清理方法,在插件卸载时执行。
-    
+
         Returns:
             装饰器函数
         """
-    
+
         def decorator(func: Callable[..., Coroutine[Any, Any, Any]]) -> Callable[..., Coroutine[Any, Any, Any]]:
             self.cleanup_method = func
             return func
-    
+
         return decorator
 
     def mount_async_task(
@@ -491,6 +493,7 @@ class NekroPlugin:
                     yield TaskCtl.fail("审批被拒绝")
             ```
         """
+
         def decorator(func: Callable[..., AsyncGenerator[Any, None]]) -> Callable[..., AsyncGenerator[Any, None]]:
             self._async_tasks[task_type] = func
             # 注册到全局 TaskRunner
@@ -499,15 +502,15 @@ class NekroPlugin:
             return func
 
         return decorator
-    
+
     def on_enabled(self) -> Callable[[Callable[[], Coroutine[Any, Any, None]]], Callable[[], Coroutine[Any, Any, None]]]:
         """装饰器：注册插件启用时的回调函数
-    
+
         回调将在插件状态变更为启用后立即执行（在配置保存和路由挂载之前）。
-    
+
         Returns:
             装饰器函数
-    
+
         Example:
             ```python
             @plugin.on_enabled()
@@ -515,21 +518,21 @@ class NekroPlugin:
                 print("插件已启用")
             ```
         """
-    
+
         def decorator(func: Callable[[], Coroutine[Any, Any, None]]) -> Callable[[], Coroutine[Any, Any, None]]:
             self._on_enabled_callbacks.append(func)
             return func
-    
+
         return decorator
-    
+
     def on_disabled(self) -> Callable[[Callable[[], Coroutine[Any, Any, None]]], Callable[[], Coroutine[Any, Any, None]]]:
         """装饰器：注册插件禁用时的回调函数
-    
+
         回调将在插件状态变更为禁用后立即执行（在配置保存之前）。
-    
+
         Returns:
             装饰器函数
-    
+
         Example:
             ```python
             @plugin.on_disabled()
@@ -537,32 +540,30 @@ class NekroPlugin:
                 print("插件已禁用")
             ```
         """
-    
+
         def decorator(func: Callable[[], Coroutine[Any, Any, None]]) -> Callable[[], Coroutine[Any, Any, None]]:
             self._on_disabled_callbacks.append(func)
             return func
-    
+
         return decorator
-    
+
     async def trigger_callbacks(self, event_type: Literal["enabled", "disabled"]) -> None:
         """触发回调函数
-    
+
         并行执行所有已注册的回调函数，异常会被捕获并记录日志。
         此方法由插件管理器在启用/禁用插件时调用。
-    
+
         Args:
             event_type: 事件类型（"enabled" 或 "disabled"）
         """
         callbacks = self._on_enabled_callbacks if event_type == "enabled" else self._on_disabled_callbacks
-    
+
         if not callbacks:
             return
-    
         self.logger.debug(f"插件 {self.name} 触发 {event_type} 回调，共 {len(callbacks)} 个")
-    
         # 并行执行所有回调
         results = await asyncio.gather(*[cb() for cb in callbacks], return_exceptions=True)
-    
+
         # 记录异常
         for i, result in enumerate(results):
             if isinstance(result, Exception):
@@ -615,26 +616,26 @@ class NekroPlugin:
 
     async def enable(self) -> None:
         """启用插件并触发相应的回调函数
-        
+
         此方法是启用插件的统一入口，确保无论从何处调用，
         都会自动执行状态变更和触发回调事件。
         """
         if self._is_enabled:
             return  # 已经启用，无需重复操作
-        
+
         self._is_enabled = True
         # 自动触发启用回调
         await self.trigger_callbacks("enabled")
 
     async def disable(self) -> None:
         """禁用插件并触发相应的回调函数
-        
+
         此方法是禁用插件的统一入口，确保无论从何处调用，
         都会自动执行状态变更和触发回调事件。
         """
         if not self._is_enabled:
             return  # 已经禁用，无需重复操作
-        
+
         self._is_enabled = False
         # 自动触发禁用回调
         await self.trigger_callbacks("disabled")
@@ -675,8 +676,12 @@ class NekroPlugin:
             return await self.prompt_inject_method.func(ctx)
         return ""
 
-    async def render_sandbox_methods_prompt(self, ctx: AgentCtx) -> str:
+    async def render_sandbox_methods_prompt(self, ctx: AgentCtx, compact: bool = False) -> str:
         """渲染沙盒方法提示词
+
+        Args:
+            ctx: Agent 上下文
+            compact: 是否使用精简模式，精简模式只输出方法签名和简短描述
 
         Returns:
             str: 沙盒方法提示
@@ -684,16 +689,69 @@ class NekroPlugin:
         prompts: List[str] = []
         methods = await self.collect_available_methods(ctx) if self._collect_methods_func else self.sandbox_methods
         for method in methods:
-            if not method.func.__doc__:
-                self.logger.warning(f"方法 {method.func.__name__} 没有可用的文档注解。")
-                continue
-            if method.method_type in [SandboxMethodType.AGENT, SandboxMethodType.MULTIMODAL_AGENT]:
-                prompts.append(
-                    f"* {method.func.__name__} - **[AGENT METHOD - STOP AFTER CALL]**\n{method.func.__doc__.strip()}",
+            if compact:
+                # 精简模式：只输出方法签名和描述
+                sig = self._get_method_signature(method.func)
+                agent_tag = (
+                    " **[AGENT]**"
+                    if method.method_type in [SandboxMethodType.AGENT, SandboxMethodType.MULTIMODAL_AGENT]
+                    else ""
                 )
+                desc = method.description or self._get_first_line_doc(method.func)
+                prompts.append(f"- `{method.func.__name__}{sig}`{agent_tag}: {desc}")
             else:
-                prompts.append(f"* {method.func.__name__}\n{method.func.__doc__.strip()}")
+                # 完整模式：输出完整文档
+                if not method.func.__doc__:
+                    logger.warning(f"方法 {method.func.__name__} 没有可用的文档注解。")
+                    continue
+                if method.method_type in [SandboxMethodType.AGENT, SandboxMethodType.MULTIMODAL_AGENT]:
+                    prompts.append(
+                        f"* {method.func.__name__} - **[AGENT METHOD - STOP AFTER CALL]**\n{method.func.__doc__.strip()}",
+                    )
+                else:
+                    prompts.append(f"* {method.func.__name__}\n{method.func.__doc__.strip()}")
         return "\n".join(prompts)
+
+    def _get_method_signature(self, func: Callable) -> str:
+        """获取方法签名（不包含 _ctx 参数）
+
+        Args:
+            func: 方法函数
+
+        Returns:
+            str: 方法签名字符串，如 "(chat_key: str, message: str)"
+        """
+        try:
+            sig = inspect.signature(func)
+            params = []
+            for name, param in sig.parameters.items():
+                if name == "_ctx":
+                    continue  # 跳过 _ctx 参数
+                if param.annotation != inspect.Parameter.empty:
+                    type_name = getattr(param.annotation, "__name__", str(param.annotation))
+                    if param.default != inspect.Parameter.empty:
+                        params.append(f"{name}: {type_name} = ...")
+                    else:
+                        params.append(f"{name}: {type_name}")
+                else:
+                    params.append(name)
+            return f"({', '.join(params)})"
+        except Exception:
+            return "()"
+
+    def _get_first_line_doc(self, func: Callable) -> str:
+        """获取函数文档的第一行
+
+        Args:
+            func: 方法函数
+
+        Returns:
+            str: 文档第一行
+        """
+        if func.__doc__:
+            first_line = func.__doc__.strip().split("\n")[0]
+            return first_line
+        return ""
 
     @property
     def store(self) -> "PluginStore":

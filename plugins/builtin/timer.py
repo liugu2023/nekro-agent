@@ -33,6 +33,9 @@ from nekro_agent.api.schemas import AgentCtx
 from nekro_agent.models.db_recurring_timer_job import DBRecurringTimerJob
 from nekro_agent.services.festival_service import FestivalService
 
+# 节日祝福专用的 chat_key（用于过滤节日定时器）
+FESTIVAL_CHAT_KEY = "system_festival"
+
 plugin = NekroPlugin(
     name="定时器工具集",
     module_name="timer",
@@ -143,7 +146,7 @@ async def timer_prompt(_ctx: AgentCtx) -> str:
     timers = await timer.get_timers(chat_key)
 
     # 过滤掉节日祝福定时器
-    timers = [t for t in timers if t.chat_key != FestivalService.FESTIVAL_CHAT_KEY]
+    timers = [t for t in timers if t.chat_key != FESTIVAL_CHAT_KEY]
 
     current_time = int(time.time())
     timer_lines: list[str] = []
