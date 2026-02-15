@@ -42,6 +42,44 @@ class MessageService:
         self.debounce_timers: Dict[str, float] = {}  # 记录每个频道的防抖计时器
         self.pending_messages: Dict[str, ChatMessage] = {}  # 记录每个频道待处理的最新消息
 
+    async def stop_chat_task(self, chat_key: str) -> bool:
+        """终止指定频道的当前任务
+
+        Args:
+            chat_key: 频道标识
+
+        Returns:
+            bool: 是否成功终止任务
+        """
+        from nekro_agent.services.sandbox.runner import stop_sandbox_container
+
+        stopped = False
+
+        # 1. 只清理防抖计时器，保留待处理消息让它后续继续处理
+        self.debounce_timers.pop(chat_key, None)
+
+        # 2. 停止沙盒容器
+        container_stopped = await stop_sandbox_container(chat_key)
+        if container_stopped:
+            logger.info(f"已停止频道 {chat_key} 的沙盒容器")
+            stopped = True
+
+        # 3. 取消正在运行的 asyncio 任务
+        if chat_key in self.running_tasks:
+            task = self.running_tasks[chat_key]
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                logger.info(f"已取消频道 {chat_key} 的 Agent 任务")
+                stopped = True
+            # 注意：不在这里删除 running_tasks，因为 finally 可能会创建新任务
+            # running_tasks 的清理由 _run_chat_agent_task 的 finally 负责
+
+        return stopped
+
     async def _message_validation_check(self, message: ChatMessage) -> bool:
         """消息校验"""
         plaint_text = message.content_text.strip().replace(" ", "").lower()
@@ -134,30 +172,40 @@ class MessageService:
         if message and adapter.config.SESSION_PROCESSING_WITH_EMOJI and message.message_id:
             await adapter.set_message_reaction(message.message_id, True)
 
+        was_cancelled = False
         try:
             for _i in range(3):
                 try:
                     await run_agent(chat_key=chat_key, chat_message=message, ctx=ctx)
+                except asyncio.CancelledError:
+                    logger.info(f"频道 {chat_key} 的 Agent 任务被取消")
+                    was_cancelled = True
+                    raise  # 重新抛出以便正确处理
                 except Exception as e:
                     logger.exception(f"执行失败: {e}")
                 else:
                     break
             else:
                 logger.error("Failed to Run Chat Agent.")
+        except asyncio.CancelledError:
+            # 任务被取消，标记状态
+            was_cancelled = True
         finally:
             # 清理任务状态
             if chat_key in self.running_tasks:
                 del self.running_tasks[chat_key]
 
-            final_message = self.pending_messages.pop(chat_key, None)
-            self.debounce_timers.pop(chat_key, None)
-
             # 取消处理emoji（如果设置过）
             if adapter.config.SESSION_PROCESSING_WITH_EMOJI and message and message.message_id:
                 await adapter.set_message_reaction(message.message_id, False)
 
-            # 如果有待处理消息，创建新的任务处理最后一条消息
+            final_message = self.pending_messages.pop(chat_key, None)
+            self.debounce_timers.pop(chat_key, None)
+
+            # 如果有待处理消息，创建新的任务处理
             if final_message:
+                if was_cancelled:
+                    logger.info(f"频道 {chat_key} 任务被取消，继续处理待处理消息")
                 new_task = asyncio.create_task(self._run_chat_agent_task(chat_key=chat_key, message=final_message, ctx=ctx))
                 self.running_tasks[chat_key] = new_task
 

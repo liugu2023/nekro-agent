@@ -90,6 +90,32 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
     await finish_with(matcher, message=f"已重置 {target_chat_key} 的对话上下文（当前会话 {msg_cnt} 条消息已归档）")
 
 
+@on_command("stop", aliases={"na_stop", "na-stop"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """终止当前频道的回复流程"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    target_chat_key = cmd_content if cmd_content and event.get_user_id() in config.SUPER_USERS else chat_key
+
+    if not target_chat_key:
+        logger.warning("聊天标识获取失败")
+        if config.ENABLE_COMMAND_UNAUTHORIZED_OUTPUT:
+            await finish_with(matcher, message="聊天标识获取失败")
+        else:
+            await matcher.finish()
+
+    # 发送正在终止的提示
+    await matcher.send(f"正在终止 {target_chat_key} 的回复流程...")
+
+    # 执行终止操作
+    stopped = await message_service.stop_chat_task(target_chat_key)
+
+    if stopped:
+        await finish_with(matcher, message=f"已终止 {target_chat_key} 的当前回复流程")
+    else:
+        await finish_with(matcher, message=f"频道 {target_chat_key} 当前没有正在执行的任务")
+
+
 @on_command("inspect", priority=5, block=True).handle()
 async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
     username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
@@ -571,6 +597,7 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
             "na_info: 查看系统信息\n"
             "====== [聊天管理] ======\n"
             "reset <chat_key?>: 清空指定聊天的聊天记录\n"
+            "stop <chat_key?>: 终止当前回复流程（包括API请求和沙盒执行）\n"
             "na_on <chat_key?>/<*>: 开启指定聊天的聊天功能\n"
             "na_off <chat_key?>/<*>: 关闭指定聊天的聊天功能\n"
             "\n====== [配额管理] ======\n"

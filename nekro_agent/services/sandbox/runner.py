@@ -347,3 +347,52 @@ async def cleanup_sandbox_containers():
                 logger.info(f"已清理容器 {container_info['Name']}")
     finally:
         await docker.close()
+
+
+async def stop_sandbox_container(chat_key: str) -> bool:
+    """停止指定频道的沙盒容器
+
+    Args:
+        chat_key: 频道标识
+
+    Returns:
+        bool: 是否成功停止容器
+    """
+    stopped = False
+
+    # 检查是否有该频道的容器在运行
+    if chat_key in chat_key_sandbox_container_map:
+        container = chat_key_sandbox_container_map[chat_key]
+        try:
+            # 尝试杀死容器
+            await container.kill()
+            logger.info(f"已杀死频道 {chat_key} 的沙盒容器")
+            stopped = True
+        except Exception as e:
+            if "404" in str(e) or "not running" in str(e).lower():
+                logger.debug(f"沙盒容器已不存在或未运行: {chat_key}")
+            else:
+                logger.error(f"停止沙盒容器失败: {e}")
+
+        try:
+            # 尝试删除容器
+            await container.delete(force=True)
+        except Exception as e:
+            if "404" not in str(e):
+                logger.debug(f"删除容器时的非关键错误: {e}")
+
+        # 清理记录
+        del chat_key_sandbox_container_map[chat_key]
+
+    # 清理清理任务
+    if chat_key in chat_key_sandbox_cleanup_task_map:
+        try:
+            chat_key_sandbox_cleanup_task_map[chat_key].cancel()
+        except Exception:
+            pass
+        del chat_key_sandbox_cleanup_task_map[chat_key]
+
+    # 清理活跃时间记录
+    chat_key_sandbox_map.pop(chat_key, None)
+
+    return stopped
