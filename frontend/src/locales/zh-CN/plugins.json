@@ -82,6 +82,7 @@
     "update": "更新",
     "reset": "重置",
     "reload": "重载",
+    "reloadAll": "重载所有插件",
     "back": "返回",
     "save": "保存",
     "cancel": "取消",
@@ -94,6 +95,8 @@
   "dialogs": {
     "reloadTitle": "确认重载插件",
     "reloadMessage": "确定要重新加载插件 {{name}} 吗？这将重新初始化插件。",
+    "reloadAllTitle": "确认重载所有插件",
+    "reloadAllMessage": "确定要重新加载所有插件吗？这将清理并重新初始化所有插件，可能需要一些时间。",
     "resetTitle": "确认重置数据",
     "resetMessage": "确定要重置插件 {{name}} 的所有数据吗？此操作不可恢复！",
     "deleteTitle": "确认删除插件",
@@ -109,6 +112,8 @@
   },
   "messages": {
     "reloadSuccess": "插件 {{name}} 已重载～ (*￣▽￣)b",
+    "reloadAllSuccess": "所有插件已重载，{{loaded}} 个成功，{{failed}} 个失败",
+    "reloadAllFailed": "重载所有插件失败",
     "deleteSuccess": "云端插件 {{name}} 已删除",
     "deleteWithDataSuccess": "云端插件 {{name}} 已删除（包括数据）",
     "updateSuccess": "云端插件 {{name}} 已更新至最新版本～",

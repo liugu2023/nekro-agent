@@ -260,3 +260,53 @@ async def verify_plugin_routes_endpoint(
         found_routes=found_routes,
         routes_count=len(found_routes),
     )
+
+
+@router.post("/reload-all", summary="强制重新加载所有插件")
+@require_role(Role.Admin)
+async def reload_all_plugins(_current_user: DBUser = Depends(get_current_active_user)) -> Ret:
+    """强制重新加载所有插件（管理员专用）
+
+    此操作会：
+    1. 清理所有已加载的插件
+    2. 重新从磁盘加载所有插件
+    3. 刷新插件路由
+    """
+    try:
+        from nekro_agent.services.plugin.router_manager import plugin_router_manager
+
+        # 记录当前加载的插件数量
+        before_count = len(plugin_collector.loaded_plugins)
+        before_failed_count = len(plugin_collector.failed_plugins)
+
+        # 清理所有插件资源
+        await plugin_collector.cleanup_all_plugins()
+
+        # 清空已加载的插件记录
+        plugin_collector.loaded_plugins.clear()
+        plugin_collector.loaded_module_names.clear()
+        plugin_collector.failed_plugins.clear()
+
+        # 重新加载所有插件
+        await plugin_collector.init_plugins()
+
+        # 刷新插件路由
+        plugin_router_manager.refresh_all_plugin_routes()
+
+        after_count = len(plugin_collector.loaded_plugins)
+        after_failed_count = len(plugin_collector.failed_plugins)
+
+        return Ret.success(
+            msg="所有插件重新加载完成",
+            data={
+                "before_loaded": before_count,
+                "before_failed": before_failed_count,
+                "after_loaded": after_count,
+                "after_failed": after_failed_count,
+                "loaded_plugins": [p.name for p in plugin_collector.get_all_plugins()],
+                "failed_plugins": [f.module_name for f in plugin_collector.get_all_failed_plugins()],
+            },
+        )
+    except Exception as e:
+        logger.exception(f"重新加载所有插件失败: {e}")
+        return Ret.error(msg=f"重新加载失败: {e!s}")

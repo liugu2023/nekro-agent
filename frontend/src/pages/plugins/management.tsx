@@ -62,6 +62,7 @@ import {
   Category as CategoryIcon,
   Bookmark as BookmarkIcon,
   MoreVert as MoreVertIcon,
+  Sync as SyncIcon,
 } from '@mui/icons-material'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Method, Plugin, pluginsApi } from '../../services/api/plugins'
@@ -1331,6 +1332,7 @@ function PluginDetails({ plugin, onBack, onToggleEnabled, isAdmin = true }: Plug
 
 export default function PluginsManagementPage() {
   const [selectedPlugin, setSelectedPlugin] = useState<Plugin | null>(null)
+  const [reloadAllConfirmOpen, setReloadAllConfirmOpen] = useState(false)
   const queryClient = useQueryClient()
   const theme = useTheme()
   const isMobile = useMediaQuery(theme.breakpoints.down('md'))
@@ -1375,6 +1377,30 @@ export default function PluginsManagementPage() {
     },
     onError: (error: Error) => {
       notification.error(t('messages.updateFailedWithMessage', { message: error.message }))
+    },
+  })
+
+  // 重新加载所有插件
+  const reloadAllMutation = useMutation({
+    mutationFn: async () => {
+      const result = await pluginsApi.reloadAllPlugins()
+      if (!result.success) {
+        throw new Error(result.errorMsg || t('messages.reloadAllFailed'))
+      }
+      return result.data
+    },
+    onSuccess: data => {
+      notification.success(
+        t('messages.reloadAllSuccess', {
+          loaded: data?.after_loaded || 0,
+          failed: data?.after_failed || 0,
+        })
+      )
+      queryClient.invalidateQueries({ queryKey: ['plugins'] })
+      setSelectedPlugin(null) // 清除选中状态，因为插件可能已经变化
+    },
+    onError: (error: Error) => {
+      notification.error(error.message)
     },
   })
 
@@ -1444,19 +1470,42 @@ export default function PluginsManagementPage() {
   const pluginListContent = (
     <>
       <Box sx={{ p: 1.5, borderBottom: 1, borderColor: 'divider' }}>
-        <TextField
-          placeholder={t('list.search')}
-          size="small"
-          value={searchTerm}
-          onChange={e => setSearchTerm(e.target.value)}
-          variant="outlined"
-          fullWidth
-          sx={{
-            '& .MuiOutlinedInput-root': {
-              borderRadius: 2,
-            },
-          }}
-        />
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+          <TextField
+            placeholder={t('list.search')}
+            size="small"
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            variant="outlined"
+            fullWidth
+            sx={{
+              '& .MuiOutlinedInput-root': {
+                borderRadius: 2,
+              },
+            }}
+          />
+          {isAdmin && (
+            <Tooltip title={t('actions.reloadAll')}>
+              <IconButton
+                size="small"
+                onClick={() => setReloadAllConfirmOpen(true)}
+                disabled={reloadAllMutation.isPending}
+                sx={{
+                  border: 1,
+                  borderColor: 'divider',
+                  borderRadius: 2,
+                  flexShrink: 0,
+                }}
+              >
+                {reloadAllMutation.isPending ? (
+                  <CircularProgress size={20} />
+                ) : (
+                  <SyncIcon fontSize="small" />
+                )}
+              </IconButton>
+            </Tooltip>
+          )}
+        </Box>
       </Box>
 
       <Box sx={{ flex: 1, overflow: 'auto' }}>
@@ -1707,6 +1756,34 @@ export default function PluginsManagementPage() {
           <ExtensionIcon />
         </Fab>
       )}
+
+      {/* 重新加载所有插件确认对话框 */}
+      <Dialog open={reloadAllConfirmOpen} onClose={() => setReloadAllConfirmOpen(false)}>
+        <DialogTitle>{t('dialogs.reloadAllTitle')}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>{t('dialogs.reloadAllMessage')}</DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button
+            onClick={() => setReloadAllConfirmOpen(false)}
+            sx={{ minWidth: { xs: 64, sm: 80 }, minHeight: { xs: 36, sm: 40 } }}
+          >
+            {t('actions.cancel')}
+          </Button>
+          <Button
+            onClick={() => {
+              reloadAllMutation.mutate()
+              setReloadAllConfirmOpen(false)
+            }}
+            color="primary"
+            variant="contained"
+            disabled={reloadAllMutation.isPending}
+            sx={{ minWidth: { xs: 64, sm: 80 }, minHeight: { xs: 36, sm: 40 } }}
+          >
+            {t('actions.confirm')}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   )
 }

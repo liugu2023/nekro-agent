@@ -265,6 +265,46 @@ export const pluginsApi = {
       return { success: false, errorMsg }
     }
   },
+
+  // 强制重新加载所有插件
+  reloadAllPlugins: async (): Promise<{
+    success: boolean
+    errorMsg?: string
+    data?: {
+      before_loaded: number
+      before_failed: number
+      after_loaded: number
+      after_failed: number
+      loaded_plugins: string[]
+      failed_plugins: string[]
+    }
+  }> => {
+    try {
+      const response = await axios.post('/plugins/reload-all')
+      if (response.data.code !== 200) {
+        return { success: false, errorMsg: response.data.msg || '重新加载失败' }
+      }
+      return { success: true, data: response.data.data }
+    } catch (error: unknown) {
+      const err = error as {
+        response?: {
+          data?: {
+            msg?: string
+            detail?: unknown
+          }
+        }
+        message?: string
+      }
+
+      const errorMsg =
+        err.response?.data?.msg ||
+        (err.response?.data?.detail ? JSON.stringify(err.response.data.detail) : '') ||
+        err.message ||
+        '未知错误'
+      console.error(errorMsg)
+      return { success: false, errorMsg }
+    }
+  },
 }
 
 export const getPlugins = pluginsApi.getPlugins
@@ -288,6 +328,7 @@ export const getModelGroups = pluginsApi.getModelGroups
 export const removePackage = pluginsApi.removePackage
 export const updatePackage = pluginsApi.updatePackage
 export const getPluginDocs = pluginsApi.getPluginDocs
+export const reloadAllPlugins = pluginsApi.reloadAllPlugins
 
 export const streamGenerateCode = (
   filePath: string,

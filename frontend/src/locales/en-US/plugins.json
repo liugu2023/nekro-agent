@@ -82,6 +82,7 @@
     "update": "Update",
     "reset": "Reset",
     "reload": "Reload",
+    "reloadAll": "Reload All Plugins",
     "back": "Back",
     "save": "Save",
     "cancel": "Cancel",
@@ -94,6 +95,8 @@
   "dialogs": {
     "reloadTitle": "Confirm Reload Plugin",
     "reloadMessage": "Are you sure you want to reload plugin {{name}}? This will reinitialize the plugin.",
+    "reloadAllTitle": "Confirm Reload All Plugins",
+    "reloadAllMessage": "Are you sure you want to reload all plugins? This will cleanup and reinitialize all plugins, which may take some time.",
     "resetTitle": "Confirm Reset Data",
     "resetMessage": "Are you sure you want to reset all data for plugin {{name}}? This action cannot be undone!",
     "deleteTitle": "Confirm Delete Plugin",
@@ -109,6 +112,8 @@
   },
   "messages": {
     "reloadSuccess": "Plugin {{name}} has been reloaded!",
+    "reloadAllSuccess": "All plugins reloaded, {{loaded}} succeeded, {{failed}} failed",
+    "reloadAllFailed": "Failed to reload all plugins",
     "deleteSuccess": "Cloud plugin {{name}} has been deleted",
     "deleteWithDataSuccess": "Cloud plugin {{name}} has been deleted (including data)",
     "updateSuccess": "Cloud plugin {{name}} has been updated to the latest version!",
