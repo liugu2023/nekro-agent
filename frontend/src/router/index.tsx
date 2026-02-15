@@ -4,6 +4,7 @@ import { CircularProgress, Box } from '@mui/material'
 import MainLayout from '../layouts/MainLayout'
 import AdapterLayout from '../layouts/AdapterLayout'
 import LoginPage from '../pages/login'
+import RequireRole from '../components/common/RequireRole'
 
 // 创建一个包装器组件来处理懒加载和加载状态
 const lazyLoad = (importFn: () => Promise<{ default: ComponentType }>) => {
@@ -49,11 +50,11 @@ const router = createHashRouter([
       },
       {
         path: 'chat-channel',
-        element: lazyLoad(() => import('../pages/chat-channel')),
+        element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/chat-channel'))}</RequireRole>,
       },
       {
         path: 'user-manager',
-        element: lazyLoad(() => import('../pages/user-manager')),
+        element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/user-manager'))}</RequireRole>,
       },
       {
         path: 'presets',
@@ -61,7 +62,7 @@ const router = createHashRouter([
       },
       {
         path: 'logs',
-        element: lazyLoad(() => import('../pages/logs')),
+        element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/logs'))}</RequireRole>,
       },
       {
         path: 'plugins',
@@ -76,7 +77,7 @@ const router = createHashRouter([
           },
           {
             path: 'editor',
-            element: lazyLoad(() => import('../pages/plugins/editor')),
+            element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/plugins/editor'))}</RequireRole>,
           },
         ],
       },
@@ -86,7 +87,7 @@ const router = createHashRouter([
       },
       {
         path: 'adapters/:adapterKey',
-        element: <AdapterLayout />,
+        element: <RequireRole minRole={2}><AdapterLayout /></RequireRole>,
         children: [
           {
             index: true,
@@ -100,7 +101,7 @@ const router = createHashRouter([
       },
       {
         path: 'settings',
-        element: lazyLoad(() => import('../pages/settings')),
+        element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/settings'))}</RequireRole>,
         children: [
           {
             index: true,

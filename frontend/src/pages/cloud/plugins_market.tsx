@@ -69,6 +69,7 @@ import { UI_STYLES, BORDER_RADIUS } from '../../theme/themeConfig'
 import { CARD_VARIANTS } from '../../theme/variants'
 import { useNotification } from '../../hooks/useNotification'
 import { useTranslation } from 'react-i18next'
+import { useIsAdmin } from '../../hooks/useIsAdmin'
 import { copyText } from '../../utils/clipboard'
 
 // 防抖自定义Hook
@@ -97,6 +98,7 @@ const PluginCard = ({
   onUnpublish,
   onShowDetail,
   t,
+  isAdmin = true,
 }: {
   plugin: CloudPlugin
   onDownload: () => void
@@ -105,6 +107,7 @@ const PluginCard = ({
   onUnpublish?: () => void
   onShowDetail: () => void
   t: (key: string, options?: Record<string, unknown>) => string
+  isAdmin?: boolean
 }) => {
   const theme = useTheme()
   // 移除 isDark 判断
@@ -324,47 +327,49 @@ const PluginCard = ({
           )}
         </Box>
 
-        {plugin.is_local ? (
-          <Box sx={{ display: 'flex', gap: 0.5 }}>
-            {isMobile ? (
-              <Button
-                size="small"
-                variant="contained"
-                startIcon={<UpdateIcon />}
-                onClick={onUpdate}
-                color="primary"
-                sx={{ mr: 1 }}
-              >
-                {t('pluginsMarket.update')}
-              </Button>
-            ) : (
-              <Button
-                size="small"
-                variant="contained"
-                startIcon={<UpdateIcon />}
-                onClick={onUpdate}
-                color="primary"
-              >
-                {t('pluginsMarket.update')}
-              </Button>
-            )}
+        {isAdmin && (
+          plugin.is_local ? (
+            <Box sx={{ display: 'flex', gap: 0.5 }}>
+              {isMobile ? (
+                <Button
+                  size="small"
+                  variant="contained"
+                  startIcon={<UpdateIcon />}
+                  onClick={onUpdate}
+                  color="primary"
+                  sx={{ mr: 1 }}
+                >
+                  {t('pluginsMarket.update')}
+                </Button>
+              ) : (
+                <Button
+                  size="small"
+                  variant="contained"
+                  startIcon={<UpdateIcon />}
+                  onClick={onUpdate}
+                  color="primary"
+                >
+                  {t('pluginsMarket.update')}
+                </Button>
+              )}
 
-            {!isMobile && (
-              <Button size="small" variant="outlined" color="error" onClick={onRemove}>
-                {t('pluginsMarket.remove')}
-              </Button>
-            )}
-          </Box>
-        ) : (
-          <Button
-            size="small"
-            variant="contained"
-            startIcon={<CloudDownloadIcon />}
-            onClick={onDownload}
-            color="primary"
-          >
-            {t('pluginsMarket.obtain')}
-          </Button>
+              {!isMobile && (
+                <Button size="small" variant="outlined" color="error" onClick={onRemove}>
+                  {t('pluginsMarket.remove')}
+                </Button>
+              )}
+            </Box>
+          ) : (
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<CloudDownloadIcon />}
+              onClick={onDownload}
+              color="primary"
+            >
+              {t('pluginsMarket.obtain')}
+            </Button>
+          )
         )}
       </CardActions>
     </Card>
@@ -1439,6 +1444,7 @@ export default function PluginsMarket() {
   const pageSize = 12
   const notification = useNotification()
   const { t } = useTranslation('cloud')
+  const isAdmin = useIsAdmin()
 
   const fetchPlugins = useCallback(
     async (page: number, keyword: string = '') => {
@@ -2187,16 +2193,18 @@ export default function PluginsMarket() {
           </Button>
         </Box>
 
-        <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
-          <Button
-            variant="contained"
-            color="primary"
-            startIcon={<AddIcon />}
-            onClick={() => setCreateDialogOpen(true)}
-          >
-            发布插件
-          </Button>
-        </Box>
+        {isAdmin && (
+          <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+            <Button
+              variant="contained"
+              color="primary"
+              startIcon={<AddIcon />}
+              onClick={() => setCreateDialogOpen(true)}
+            >
+              发布插件
+            </Button>
+          </Box>
+        )}
       </Box>
 
       {/* 插件内容区域 */}
@@ -2259,6 +2267,7 @@ export default function PluginsMarket() {
                     onUnpublish={plugin.isOwner ? () => handleUnpublishClick(plugin) : undefined}
                     onShowDetail={() => handleShowDetail(plugin)}
                     t={t}
+                    isAdmin={isAdmin}
                   />
                 </Grid>
               ))}

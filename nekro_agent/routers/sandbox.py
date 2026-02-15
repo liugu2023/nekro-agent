@@ -47,7 +47,7 @@ class SandboxStats(BaseModel):
 
 
 @router.get("/logs", summary="获取沙盒执行日志")
-@require_role(Role.Admin)
+@require_role(Role.User)
 async def get_sandbox_logs(
     page: int = 1,
     page_size: int = 20,
@@ -92,7 +92,7 @@ async def get_sandbox_logs(
 
 
 @router.get("/log-content", summary="获取沙盒执行日志内容")
-@require_role(Role.Admin)
+@require_role(Role.User)
 async def get_sandbox_log_content(
     log_path: str,
     _current_user: DBUser = Depends(get_current_active_user),
@@ -117,7 +117,7 @@ async def get_sandbox_log_content(
 
 
 @router.get("/stats", summary="获取沙盒执行统计")
-@require_role(Role.Admin)
+@require_role(Role.User)
 async def get_sandbox_stats(_current_user: DBUser = Depends(get_current_active_user)) -> SandboxStats:
     """获取沙盒执行统计信息"""
     total = await DBExecCode.all().count()

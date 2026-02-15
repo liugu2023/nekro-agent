@@ -74,7 +74,7 @@ class CreateResponse(BaseModel):
 
 
 @router.get("/list", summary="获取云端插件列表")
-@require_role(Role.Admin)
+@require_role(Role.User)
 async def get_cloud_plugins_list(
     page: int = Query(1, ge=1),
     page_size: int = Query(12, ge=1, le=100),
@@ -145,7 +145,7 @@ async def get_cloud_plugins_list(
 
 
 @router.get("/user-plugins", summary="获取用户已上传的插件")
-@require_role(Role.Admin)
+@require_role(Role.User)
 async def get_user_plugins(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> List[UserPlugin]:
@@ -162,7 +162,7 @@ async def get_user_plugins(
 
 
 @router.get("/detail/{plugin_id}", summary="获取插件详情")
-@require_role(Role.Admin)
+@require_role(Role.User)
 async def get_plugin_detail(
     plugin_id: str,
     _current_user: DBUser = Depends(get_current_active_user),
@@ -197,7 +197,7 @@ async def get_plugin_detail(
 
 
 @router.get("/repo/{module_name}", summary="获取插件仓库信息")
-@require_role(Role.Admin)
+@require_role(Role.User)
 async def get_plugin_repo(
     module_name: str,
     _current_user: DBUser = Depends(get_current_active_user),

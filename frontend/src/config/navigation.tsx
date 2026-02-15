@@ -24,6 +24,7 @@ export interface PageConfig {
   translationKey?: string // 翻译键（可选，适配器配置可能没有）
   icon: JSX.Element
   parent?: string // 父菜单的 key
+  minRole?: number // 最低权限等级（不设置则所有登录用户可见）
 }
 
 export interface MenuGroup {
@@ -32,6 +33,7 @@ export interface MenuGroup {
   translationKey?: string // 翻译键（可选，适配器配置可能没有）
   icon: JSX.Element
   children: PageConfig[]
+  minRole?: number // 最低权限等级（不设置则所有登录用户可见）
 }
 
 // 获取翻译的辅助函数
@@ -79,12 +81,14 @@ export const getPageConfigs = (): (PageConfig | MenuGroup)[] => [
     text: t('menu.chatChannel'),
     translationKey: 'menu.chatChannel',
     icon: <ChatIcon />,
+    minRole: 2,
   },
   {
     path: '/user-manager',
     text: t('menu.userManager'),
     translationKey: 'menu.userManager',
     icon: <GroupIcon />,
+    minRole: 2,
   },
   {
     path: '/presets',
@@ -111,6 +115,7 @@ export const getPageConfigs = (): (PageConfig | MenuGroup)[] => [
         translationKey: 'menu.pluginEditor',
         icon: <CodeIcon />,
         parent: 'plugins',
+        minRole: 2,
       },
     ],
   },
@@ -119,6 +124,7 @@ export const getPageConfigs = (): (PageConfig | MenuGroup)[] => [
     text: t('menu.logs'),
     translationKey: 'menu.logs',
     icon: <TerminalIcon />,
+    minRole: 2,
   },
   {
     path: '/sandbox-logs',
@@ -132,12 +138,14 @@ export const getPageConfigs = (): (PageConfig | MenuGroup)[] => [
     translationKey: 'menu.adapters',
     icon: <HubIcon />,
     children: getAdapterNavigationConfigs(),
+    minRole: 2,
   },
   {
     key: 'settings',
     text: t('menu.settings'),
     translationKey: 'menu.settings',
     icon: <SettingsIcon />,
+    minRole: 2,
     children: [
       {
         path: '/settings/system',
@@ -181,27 +189,40 @@ export const getPageConfigs = (): (PageConfig | MenuGroup)[] => [
 export const PAGE_CONFIGS = getPageConfigs()
 
 // 转换配置为菜单项的工具函数
-export const createMenuItems = () => {
-  return getPageConfigs().map(config => {
-    if ('children' in config) {
+export const createMenuItems = (permLevel?: number) => {
+  return getPageConfigs()
+    .filter(config => {
+      const minRole = config.minRole ?? 0
+      if (permLevel !== undefined && permLevel < minRole) return false
+      return true
+    })
+    .map(config => {
+      if ('children' in config) {
+        const filteredChildren = config.children.filter(child => {
+          const childMinRole = child.minRole ?? 0
+          if (permLevel !== undefined && permLevel < childMinRole) return false
+          return true
+        })
+        if (filteredChildren.length === 0) return null
+        return {
+          text: config.text,
+          icon: config.icon,
+          path: undefined,
+          key: config.key,
+          children: filteredChildren.map(child => ({
+            text: child.text,
+            icon: child.icon,
+            path: child.path,
+          })),
+        }
+      }
       return {
         text: config.text,
         icon: config.icon,
-        path: undefined,
-        key: config.key,
-        children: config.children.map(child => ({
-          text: child.text,
-          icon: child.icon,
-          path: child.path,
-        })),
+        path: config.path,
       }
-    }
-    return {
-      text: config.text,
-      icon: config.icon,
-      path: config.path,
-    }
-  })
+    })
+    .filter(Boolean) as ReturnType<typeof createMenuItems>
 }
 
 // 获取当前页面信息的工具函数

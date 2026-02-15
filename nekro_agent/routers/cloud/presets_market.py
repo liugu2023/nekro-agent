@@ -40,7 +40,7 @@ class ActionResponse(BaseModel):
 
 
 @router.get("/list", summary="获取云端人设列表")
-@require_role(Role.Admin)
+@require_role(Role.User)
 async def get_cloud_presets_list(
     page: int = Query(1, ge=1),
     page_size: int = Query(12, ge=1, le=100),

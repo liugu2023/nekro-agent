@@ -72,9 +72,10 @@ export default function MainLayout() {
   // 侧边栏宽度：英文模式需要更宽以容纳较长的文本
   const drawerWidth = currentLocale === 'en-US' ? 260 : 240
 
-  // 动态生成菜单项（响应语言变化）
+  // 动态生成菜单项（响应语言变化和用户权限）
+  const permLevel = userInfo?.perm_level ?? 0
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const menuItems = useMemo(() => createMenuItems(), [currentLocale])
+  const menuItems = useMemo(() => createMenuItems(permLevel), [currentLocale, permLevel])
 
   // 使用壁纸store
   const { mainWallpaper, mainWallpaperMode, mainWallpaperBlur, mainWallpaperDim } =
