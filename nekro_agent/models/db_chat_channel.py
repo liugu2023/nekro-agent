@@ -1,8 +1,7 @@
 import json
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
-from pydantic import BaseModel
 from tortoise import fields
 from tortoise.models import Model
 
@@ -17,13 +16,6 @@ from nekro_agent.services.plugin.collector import plugin_collector
 if TYPE_CHECKING:
     from nekro_agent.adapters.interface.base import BaseAdapter
     from nekro_agent.core.config import CoreConfig
-
-
-class DefaultPreset(BaseModel):
-    """默认人设"""
-
-    name: str
-    content: str
 
 
 class DBChatChannel(Model):
@@ -132,18 +124,37 @@ class DBChatChannel(Model):
             logger.error(f"获取聊天频道类型失败: {e!s}")
             return ChatType.UNKNOWN
 
-    async def get_preset(self) -> Union[DBPreset, DefaultPreset]:
-        """获取人设"""
-        preset = await DBPreset.get_or_none(id=self.preset_id)
-        if not preset:
-            # 如果频道未配置人设，使用系统默认人设
-            # 使用 filter().first() 避免 MultipleObjectsReturned 异常
-            system_preset = await DBPreset.filter(author="__system__").first()
-            if system_preset:
-                return system_preset
-            # 降级处理：如果系统默认人设不存在，使用旧配置
-            return DefaultPreset(name=config.AI_CHAT_PRESET_NAME, content=config.AI_CHAT_PRESET_SETTING)
-        return preset
+    async def get_preset(self) -> DBPreset:
+        """获取人设
+
+        回退链:
+        1. 频道指定人设 (preset_id)
+        2. 全局配置指定人设 (AI_CHAT_PRESET_ID)
+        3. 系统默认人设 (author="__system__")
+        """
+        # 1. 频道自身指定的人设
+        if self.preset_id is not None:
+            preset = await DBPreset.get_or_none(id=self.preset_id)
+            if preset:
+                return preset
+
+        # 2. 全局配置指定的默认人设
+        preset_id_str = config.AI_CHAT_PRESET_ID
+        if preset_id_str and preset_id_str != "-1":
+            try:
+                config_preset = await DBPreset.get_or_none(id=int(preset_id_str))
+                if config_preset:
+                    return config_preset
+            except (ValueError, TypeError):
+                pass
+
+        # 3. 系统默认人设
+        system_preset = await DBPreset.filter(author="__system__").first()
+        if system_preset:
+            return system_preset
+
+        # 不应该走到这里，迁移会保证系统人设存在
+        raise RuntimeError("未找到任何可用人设，请检查人设管理中是否存在系统默认人设")
 
     @property
     def adapter(self) -> "BaseAdapter":
@@ -173,6 +184,6 @@ class DBChatChannel(Model):
 
         # 获取人设信息
         preset = await self.get_preset()
-        preset_name = preset.name if hasattr(preset, "name") else "默认人设"
+        preset_name = preset.name
 
         return f"设置成功，当前人设: {preset_name}"

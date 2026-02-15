@@ -1327,10 +1327,10 @@ export default function ConfigTable({
     }
 
     if (config.ref_presets) {
-      // 对于人设选择器，rawValue 应该是数字字符串或 "-1"
-      const numericValue = rawValue === '' ? '-1' : rawValue
-      const selectedPreset = numericValue !== '-1' ? presetMap[numericValue] : null
-      const isInvalidValue = Boolean(numericValue !== '-1' && !selectedPreset)
+      // 对于人设选择器，rawValue 应该是数字字符串（指向真实人设ID）
+      const numericValue = rawValue === '' || rawValue === '-1' ? '' : rawValue
+      const selectedPreset = numericValue ? presetMap[numericValue] : null
+      const isInvalidValue = Boolean(numericValue && !selectedPreset)
 
       return (
         <Box sx={{ width: '100%', display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -1348,9 +1348,6 @@ export default function ConfigTable({
               displayEmpty: true,
             }}
           >
-            <MenuItem value="-1">
-              <em>{t('configTable.defaultPreset')}</em>
-            </MenuItem>
             {presets.map(preset => (
               <MenuItem key={preset.id} value={preset.id.toString()}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>

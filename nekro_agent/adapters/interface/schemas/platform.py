@@ -1,10 +1,10 @@
 from enum import Enum
 from time import time
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING, List, Optional
 
 from pydantic import BaseModel, Field
 
-from nekro_agent.models.db_chat_channel import DBChatChannel, DefaultPreset
+from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_preset import DBPreset
 from nekro_agent.schemas.chat_message import ChatMessageSegment, ChatType
 
@@ -34,7 +34,7 @@ class PlatformChannel(BaseModel):
             channel_type=self.channel_type,
         )
 
-    async def get_preset(self, adapter: "BaseAdapter") -> Union[DBPreset, DefaultPreset]:
+    async def get_preset(self, adapter: "BaseAdapter") -> DBPreset:
         return await (await self.get_db_chat_channel(adapter)).get_preset()
 
 

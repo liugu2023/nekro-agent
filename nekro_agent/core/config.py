@@ -344,8 +344,8 @@ class CoreConfig(ConfigBase):
                 en_US="Default Chat Preset",
             ),
             i18n_description=i18n_text(
-                zh_CN="从系统人设列表中选择，-1表示使用系统内置默认人设",
-                en_US="Select from system presets, -1 means use system default",
+                zh_CN="未指定频道人设时使用的全局默认人设（启动时自动迁移为实际人设ID）",
+                en_US="Global default preset used when no channel-specific preset is set (auto-migrated to actual preset ID on startup)",
             ),
         ).model_dump(),
     )

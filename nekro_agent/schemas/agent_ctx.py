@@ -323,7 +323,7 @@ class AgentCtx(BaseModel):
             preset_id (int): 人设ID，-1表示使用默认人设
 
         Returns:
-            DBPreset | DefaultPreset: 人设数据对象，如果为-1则返回默认人设
+            DBPreset: 人设数据对象
 
         Example:
             >>> preset = await _ctx.get_effective_preset_by_id(-1)
@@ -341,18 +341,21 @@ class AgentCtx(BaseModel):
         if self._db_chat_channel:
             return await self._db_chat_channel.get_preset()
 
-        # 无频道上下文的降级处理
-        # 使用 filter().first() 避免 MultipleObjectsReturned 异常
+        # 无频道上下文：全局配置 → 系统人设
+        preset_id_str = config.AI_CHAT_PRESET_ID
+        if preset_id_str and preset_id_str != "-1":
+            try:
+                config_preset = await DBPreset.get_or_none(id=int(preset_id_str))
+                if config_preset:
+                    return config_preset
+            except (ValueError, TypeError):
+                pass
+
         system_preset = await DBPreset.filter(author="__system__").first()
         if system_preset:
             return system_preset
 
-        from nekro_agent.models.db_chat_channel import DefaultPreset
-
-        return DefaultPreset(
-            name=config.AI_CHAT_PRESET_NAME,
-            content=config.AI_CHAT_PRESET_SETTING,
-        )
+        raise RuntimeError("未找到任何可用人设，请检查人设管理中是否存在系统默认人设")
 
     async def set_preset(self, preset_id: Optional[int] = None) -> bool:
         """设置当前生效的人设"""
