@@ -46,7 +46,7 @@ async def collect_message(
         ret = await user_register(
             UserCreate(
                 username=platform_user.user_name,
-                password="",
+                password=f"{platform_user.user_id}@123",
                 adapter_key=adapter.key,
                 platform_userid=platform_user.user_id,
             ),

@@ -13,6 +13,7 @@ from nekro_agent.core.database import init_db
 from nekro_agent.core.logger import logger
 from nekro_agent.routers import mount_api_routes, mount_middlewares
 from nekro_agent.services.festival_service import festival_service
+from nekro_agent.services.user.migration import migrate_empty_passwords
 from nekro_agent.services.mail.mail_service import send_bot_status_email
 from nekro_agent.services.plugin.collector import init_plugins
 from nekro_agent.services.timer.recurring_timer_service import recurring_timer_service
@@ -48,6 +49,7 @@ async def on_startup():
 
     # 初始化数据库、适配器和插件
     await init_db()
+    await migrate_empty_passwords()
     await init_adapters(app)
     await init_plugins()
 

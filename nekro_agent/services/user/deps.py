@@ -60,6 +60,9 @@ async def get_current_user(request: Request, token: Optional[str] = None) -> DBU
         raise UnauthorizedError from e
     if token_data.username == "admin":
         user = await DBUser.get_or_none(username="admin")
+    elif ":" in token_data.username:
+        adapter_key, platform_userid = token_data.username.split(":", 1)
+        user = await DBUser.get_or_none(adapter_key=adapter_key, platform_userid=platform_userid)
     else:
         user = await DBUser.get_or_none(username=token_data.username)
     if user is None:
