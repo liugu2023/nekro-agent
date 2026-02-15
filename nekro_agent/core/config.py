@@ -1061,21 +1061,6 @@ class CoreConfig(ConfigBase):
     )
 
     """其他功能"""
-    ENABLE_FESTIVAL_REMINDER: bool = Field(
-        default=True,
-        title="启用节日祝福提醒",
-        description="启用后会在节日时自动向所有活跃聊天发送祝福",
-        json_schema_extra=ExtraField(
-            i18n_title=i18n_text(
-                zh_CN="启用节日祝福提醒",
-                en_US="Enable Festival Greeting Reminder",
-            ),
-            i18n_description=i18n_text(
-                zh_CN="启用后会在节日时自动向所有活跃聊天发送祝福",
-                en_US="Automatically send greetings to all active chats on festivals",
-            ),
-        ).model_dump(),
-    )
     ENABLE_ADVANCED_COMMAND: bool = Field(
         default=False,
         title="启用高级管理命令",
