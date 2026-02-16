@@ -1,7 +1,7 @@
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.models.db_user import DBUser
@@ -32,6 +32,8 @@ router = APIRouter(prefix="/cloud/plugins-market", tags=["Cloud Plugins Market"]
 
 
 class CloudPlugin(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: str
     name: str
     moduleName: str
