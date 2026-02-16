@@ -1,8 +1,6 @@
 from datetime import datetime
-from typing import Optional
 
 from nekro_agent.core import logger
-from nekro_agent.core.config import config
 from nekro_agent.core.os_env import OsEnv
 from nekro_agent.models.db_user import DBUser
 from nekro_agent.schemas.errors import (
@@ -19,7 +17,6 @@ from nekro_agent.services.user.auth import (
     create_access_token,
     create_refresh_token,
     get_hashed_password,
-    verify_password,
 )
 from nekro_agent.services.user.perm import Role
 
@@ -45,52 +42,24 @@ async def user_register(data: UserCreate) -> None:
 
 
 async def user_login(data: UserLogin) -> UserToken:
-    # admin 登录
-    if data.username == "admin":
-        if OsEnv.ADMIN_PASSWORD and data.password == OsEnv.ADMIN_PASSWORD:
-            user = await DBUser.get_or_none(username="admin")
-            if not user:
-                await DBUser.create(
-                    username="admin",
-                    password=get_hashed_password(data.password),
-                    adapter_key="",
-                    platform_userid="",
-                    perm_level=Role.Admin,
-                    login_time=datetime.now(),
-                )
-            return UserToken(
-                access_token=create_access_token(data.username),
-                refresh_token=create_refresh_token(data.username),
-                token_type="bearer",
+    if data.username != "admin":
+        raise InvalidCredentialsError
+    if OsEnv.ADMIN_PASSWORD and data.username == "admin" and data.password == OsEnv.ADMIN_PASSWORD:
+        user = await DBUser.get_or_none(username="admin")
+        if not user:
+            await DBUser.create(
+                username="admin",
+                password=get_hashed_password(data.password),
+                adapter_key="",
+                platform_userid="",
+                perm_level=Role.Admin,
+                login_time=datetime.now(),
             )
-        raise InvalidCredentialsError
-
-    # 支持 platform_userid 直接登录，也支持 adapter_key:platform_userid 格式
-    user: Optional[DBUser] = None
-    if ":" in data.username:
-        adapter_key, platform_userid = data.username.split(":", 1)
-        user = await DBUser.get_or_none(adapter_key=adapter_key, platform_userid=platform_userid)
-    else:
-        user = await DBUser.filter(platform_userid=data.username).first()
-    if not user:
-        logger.warning(f"登录失败: 未找到用户 '{data.username}'")
-        raise InvalidCredentialsError
-    if user.unique_id not in config.SUPER_USERS and not config.ALLOW_SUPER_USERS_LOGIN:
-        logger.warning(f"登录失败: 用户 '{user.username}' 不在 SUPER_USERS 中且 ALLOW_SUPER_USERS_LOGIN 未启用")
-        raise InvalidCredentialsError
-    logger.info(f"用户 {user.username} (platform_userid={user.platform_userid}) 正在登录")
-    if user and verify_password(data.password, user.password):
-        logger.info(f"用户 {user.username} 登录成功")
-        if user.unique_id in config.SUPER_USERS:
-            user.perm_level = Role.Admin.value
-        user.login_time = datetime.now()
-        await user.save()
         return UserToken(
-            access_token=create_access_token(user.unique_id),
-            refresh_token=create_refresh_token(user.unique_id),
+            access_token=create_access_token(data.username),
+            refresh_token=create_refresh_token(data.username),
             token_type="bearer",
         )
-    logger.info(f"用户 {data.username} 登录校验失败 ")
     raise InvalidCredentialsError
 
 
