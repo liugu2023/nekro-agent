@@ -37,7 +37,6 @@ import { useNavigate } from 'react-router-dom'
 import { UI_STYLES } from '../../theme/themeConfig'
 import { CHIP_VARIANTS, CARD_VARIANTS } from '../../theme/variants'
 import { useTranslation } from 'react-i18next'
-import { useIsAdmin } from '../../hooks/useIsAdmin'
 
 // 防抖自定义Hook
 function useDebounce<T>(value: T, delay: number): T {
@@ -62,13 +61,11 @@ const PresetCard = ({
   onDownload,
   onShowDetail,
   t,
-  isAdmin = true,
 }: {
   preset: CloudPreset
   onDownload: () => void
   onShowDetail: () => void
   t: (key: string, options?: Record<string, unknown>) => string
-  isAdmin?: boolean
 }) => {
   const tagsArray = preset.tags.split(',').filter(tag => tag.trim())
 
@@ -173,18 +170,16 @@ const PresetCard = ({
         <Button size="small" variant="text" startIcon={<InfoIcon />} onClick={onShowDetail}>
           {t('presetsMarket.details')}
         </Button>
-        {isAdmin && (
-          <Button
-            size="small"
-            variant={preset.is_local ? 'text' : 'contained'}
-            startIcon={preset.is_local ? <DoneIcon /> : <CloudDownloadIcon />}
-            onClick={onDownload}
-            disabled={preset.is_local}
-            color="primary"
-          >
-            {preset.is_local ? t('presetsMarket.obtained') : t('presetsMarket.obtain')}
-          </Button>
-        )}
+        <Button
+          size="small"
+          variant={preset.is_local ? 'text' : 'contained'}
+          startIcon={preset.is_local ? <DoneIcon /> : <CloudDownloadIcon />}
+          onClick={onDownload}
+          disabled={preset.is_local}
+          color="primary"
+        >
+          {preset.is_local ? t('presetsMarket.obtained') : t('presetsMarket.obtain')}
+        </Button>
       </CardActions>
     </Card>
   )
@@ -391,7 +386,6 @@ export default function PresetsMarket() {
   const { enqueueSnackbar } = useSnackbar()
   const navigate = useNavigate()
   const { t } = useTranslation('cloud')
-  const isAdmin = useIsAdmin()
   const pageSize = 12
 
   const fetchPresets = useCallback(
@@ -629,7 +623,6 @@ export default function PresetsMarket() {
                     onDownload={() => handleDownloadClick(preset)}
                     onShowDetail={() => handleShowDetail(preset)}
                     t={t}
-                    isAdmin={isAdmin}
                   />
                 </Grid>
               ))}

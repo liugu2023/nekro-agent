@@ -92,7 +92,7 @@ class ReloadAllResponse(BaseModel):
 
 
 @router.get("/list", summary="获取插件列表", response_model=List[dict])
-@require_role(Role.User)
+@require_role(Role.Admin)
 async def get_plugins(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> List[dict]:
@@ -101,7 +101,7 @@ async def get_plugins(
 
 
 @router.get("/detail/{plugin_id}", summary="获取插件详情", response_model=dict)
-@require_role(Role.User)
+@require_role(Role.Admin)
 async def get_plugin_detail_handler(
     plugin_id: str,
     _current_user: DBUser = Depends(get_current_active_user),
@@ -137,7 +137,7 @@ async def toggle_plugin(
 
 
 @router.get("/docs/{plugin_id}", summary="获取插件文档", response_model=PluginDocsResponse)
-@require_role(Role.User)
+@require_role(Role.Admin)
 async def get_plugin_docs(
     plugin_id: str,
     _current_user: DBUser = Depends(get_current_active_user),

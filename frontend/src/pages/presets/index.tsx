@@ -52,7 +52,6 @@ import { UI_STYLES } from '../../theme/themeConfig'
 import { Fade } from '@mui/material'
 import PaginationStyled from '../../components/common/PaginationStyled'
 import { useTranslation } from 'react-i18next'
-import { useIsAdmin } from '../../hooks/useIsAdmin'
 
 // 定义预设编辑表单数据类型
 interface PresetFormData {
@@ -580,7 +579,6 @@ const PresetCard = ({
   onRefreshList,
   isMobile,
   isSmall,
-  isAdmin = true,
 }: {
   preset: Preset
   onExpand: () => void
@@ -593,7 +591,6 @@ const PresetCard = ({
   onRefreshList: () => Promise<void>
   isMobile?: boolean
   isSmall?: boolean
-  isAdmin?: boolean
 }) => {
   const { enqueueSnackbar } = useSnackbar()
   const { t } = useTranslation('presets')
@@ -996,42 +993,36 @@ const PresetCard = ({
           {t('card.moreActions')}
         </Button>
         <Box>
-          {isAdmin && (
-            <>
-              <Tooltip title={t('card.edit')}>
-                <IconButton size="small" color="primary" onClick={onEdit}>
-                  <EditIcon />
-                </IconButton>
-              </Tooltip>
-              {preset.remote_id && preset.on_shared && (
-                <Tooltip title={t('cloud.syncFromCloud')}>
-                  <IconButton
-                    size="small"
-                    color="primary"
-                    onClick={async () => {
-                      setSyncLoading(true)
-                      try {
-                        await onSync(preset.id)
-                      } catch (error) {
-                        console.error('同步按钮错误:', error)
-                      } finally {
-                        setSyncLoading(false)
-                      }
-                    }}
-                    disabled={syncLoading}
-                  >
-                    {syncLoading ? <CircularProgress size={24} /> : <SyncIcon />}
-                  </IconButton>
-                </Tooltip>
-              )}
-              {renderShareButtons()}
-              <Tooltip title={t('card.delete')}>
-                <IconButton size="small" color="error" onClick={onDelete}>
-                  <DeleteIcon />
-                </IconButton>
-              </Tooltip>
-            </>
+          <Tooltip title={t('card.edit')}>
+            <IconButton size="small" color="primary" onClick={onEdit}>
+              <EditIcon />
+            </IconButton>
+          </Tooltip>
+          {preset.remote_id && preset.on_shared && (
+            <Tooltip title={t('cloud.syncFromCloud')}>
+              <IconButton
+                size="small"
+                color="primary"
+                onClick={async () => {
+                  setSyncLoading(true)
+                try {
+                  await onSync(preset.id)
+                } finally {
+                  setSyncLoading(false)
+                }
+                }}
+                disabled={syncLoading}
+              >
+                {syncLoading ? <CircularProgress size={24} /> : <SyncIcon />}
+              </IconButton>
+            </Tooltip>
           )}
+          {renderShareButtons()}
+          <Tooltip title={t('card.delete')}>
+            <IconButton size="small" color="error" onClick={onDelete}>
+              <DeleteIcon />
+            </IconButton>
+          </Tooltip>
         </Box>
       </CardActions>
 
@@ -1413,7 +1404,6 @@ export default function PresetsPage() {
   const isLargeScreen = useMediaQuery(theme.breakpoints.up('lg'))
   const isExtraLargeScreen = useMediaQuery(theme.breakpoints.up('xl'))
   const { t } = useTranslation('presets')
-  const isAdmin = useIsAdmin()
 
   // 统一使用 notistack 的通知系统
   const showError = useCallback(
@@ -1605,7 +1595,6 @@ export default function PresetsPage() {
       onRefreshList={fetchData}
       isMobile={isMobile}
       isSmall={isSmall}
-      isAdmin={isAdmin}
     />
   )
 
@@ -1638,36 +1627,34 @@ export default function PresetsPage() {
             搜索
           </Button> */}
         </Box>
-        {isAdmin && (
-          <Box className="flex gap-2">
-            <Button
-              variant="outlined"
-              startIcon={<CloudSyncIcon />}
-              onClick={handleRefreshSharedStatus}
-              disabled={refreshingShared}
-              size={isSmall ? 'small' : 'medium'}
-            >
-              {refreshingShared ? (
-                <CircularProgress size={isSmall ? 16 : 24} />
-              ) : isMobile ? (
-                t('actions.refreshShort')
-              ) : (
-                t('actions.refresh')
-              )}
-            </Button>
-            <Button
-              variant="contained"
-              startIcon={<AddIcon />}
-              onClick={() => {
-                setEditingPreset(undefined)
-                setEditDialog(true)
-              }}
-              size={isSmall ? 'small' : 'medium'}
-            >
-              {t('actions.create')}
-            </Button>
-          </Box>
-        )}
+        <Box className="flex gap-2">
+          <Button
+            variant="outlined"
+            startIcon={<CloudSyncIcon />}
+            onClick={handleRefreshSharedStatus}
+            disabled={refreshingShared}
+            size={isSmall ? 'small' : 'medium'}
+          >
+            {refreshingShared ? (
+              <CircularProgress size={isSmall ? 16 : 24} />
+            ) : isMobile ? (
+              t('actions.refreshShort')
+            ) : (
+              t('actions.refresh')
+            )}
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={() => {
+              setEditingPreset(undefined)
+              setEditDialog(true)
+            }}
+            size={isSmall ? 'small' : 'medium'}
+          >
+            {t('actions.create')}
+          </Button>
+        </Box>
       </Box>
 
       {/* 标签过滤栏 */}
@@ -1805,19 +1792,17 @@ export default function PresetsPage() {
           <Typography color="text.secondary" gutterBottom>
             {t('list.noResults')}
           </Typography>
-          {isAdmin && (
-            <Button
-              variant="outlined"
-              startIcon={<AddIcon />}
-              onClick={() => {
-                setEditingPreset(undefined)
-                setEditDialog(true)
-              }}
-              size={isSmall ? 'small' : 'medium'}
-            >
-              {t('actions.create')}
-            </Button>
-          )}
+          <Button
+            variant="outlined"
+            startIcon={<AddIcon />}
+            onClick={() => {
+              setEditingPreset(undefined)
+              setEditDialog(true)
+            }}
+            size={isSmall ? 'small' : 'medium'}
+          >
+            {t('actions.create')}
+          </Button>
         </Box>
       )}
 

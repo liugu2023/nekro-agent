@@ -78,7 +78,6 @@ import {
 } from '../../theme/variants'
 import { useNotification } from '../../hooks/useNotification'
 import { useTranslation } from 'react-i18next'
-import { useIsAdmin } from '../../hooks/useIsAdmin'
 import { getLocalizedText } from '../../services/api/types'
 import { copyText } from '../../utils/clipboard'
 
@@ -98,11 +97,10 @@ interface PluginDetailProps {
   plugin: Plugin
   onBack: () => void
   onToggleEnabled: (id: string, enabled: boolean) => void
-  isAdmin?: boolean
 }
 
 // 插件详情组件
-function PluginDetails({ plugin, onBack, onToggleEnabled, isAdmin = true }: PluginDetailProps) {
+function PluginDetails({ plugin, onBack, onToggleEnabled }: PluginDetailProps) {
   const [activeTab, setActiveTab] = useState(0)
   const [reloadConfirmOpen, setReloadConfirmOpen] = useState(false)
   const [resetDataConfirmOpen, setResetDataConfirmOpen] = useState(false)
@@ -337,7 +335,6 @@ function PluginDetails({ plugin, onBack, onToggleEnabled, isAdmin = true }: Plug
                   checked={plugin.enabled}
                   onChange={e => onToggleEnabled(plugin.id, e.target.checked)}
                   color="primary"
-                  disabled={!isAdmin}
                 />
               }
               label={plugin.enabled ? t('status.enabled') : t('status.disabled')}
@@ -396,7 +393,6 @@ function PluginDetails({ plugin, onBack, onToggleEnabled, isAdmin = true }: Plug
           </Tabs>
 
           {/* 操作按钮组 */}
-          {isAdmin && (
           <Stack direction="row" spacing={1} sx={{ pl: 2, flexShrink: 0 }}>
             {isMobile ? (
               // 移动端：只显示更多操作按钮
@@ -533,7 +529,6 @@ function PluginDetails({ plugin, onBack, onToggleEnabled, isAdmin = true }: Plug
               </>
             )}
           </Stack>
-          )}
         </Box>
       </Card>
 
@@ -1340,7 +1335,6 @@ export default function PluginsManagementPage() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const notification = useNotification()
   const { t, i18n } = useTranslation('plugins')
-  const isAdmin = useIsAdmin()
 
   // 获取插件列表 - 只获取基础列表，不获取详情
   const { data: plugins = [], isLoading } = useQuery({
@@ -1661,7 +1655,6 @@ export default function PluginsManagementPage() {
                 plugin={selectedPlugin}
                 onBack={() => setSelectedPlugin(null)}
                 onToggleEnabled={handleToggleEnabled}
-                isAdmin={isAdmin}
               />
             ) : (
               <Card
@@ -1711,7 +1704,6 @@ export default function PluginsManagementPage() {
                 plugin={selectedPlugin}
                 onBack={() => setSelectedPlugin(null)}
                 onToggleEnabled={handleToggleEnabled}
-                isAdmin={isAdmin}
               />
             ) : (
               <Card

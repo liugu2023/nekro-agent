@@ -12,7 +12,7 @@ router = APIRouter(prefix="/cloud/telemetry", tags=["Cloud Telemetry"])
 
 
 @router.get("/community-stats", summary="获取社区统计数据")
-@require_role(Role.User)
+@require_role(Role.Admin)
 async def get_community_stats_api(
     force_refresh: bool = False,
     _current_user: DBUser = Depends(get_current_active_user),

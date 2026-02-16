@@ -4,7 +4,6 @@ import { CircularProgress, Box } from '@mui/material'
 import MainLayout from '../layouts/MainLayout'
 import AdapterLayout from '../layouts/AdapterLayout'
 import LoginPage from '../pages/login'
-import RequireRole from '../components/common/RequireRole'
 
 // 创建一个包装器组件来处理懒加载和加载状态
 const lazyLoad = (importFn: () => Promise<{ default: ComponentType }>) => {
@@ -50,11 +49,11 @@ const router = createHashRouter([
       },
       {
         path: 'chat-channel',
-        element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/chat-channel'))}</RequireRole>,
+        element: lazyLoad(() => import('../pages/chat-channel')),
       },
       {
         path: 'user-manager',
-        element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/user-manager'))}</RequireRole>,
+        element: lazyLoad(() => import('../pages/user-manager')),
       },
       {
         path: 'presets',
@@ -62,7 +61,7 @@ const router = createHashRouter([
       },
       {
         path: 'logs',
-        element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/logs'))}</RequireRole>,
+        element: lazyLoad(() => import('../pages/logs')),
       },
       {
         path: 'plugins',
@@ -77,7 +76,7 @@ const router = createHashRouter([
           },
           {
             path: 'editor',
-            element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/plugins/editor'))}</RequireRole>,
+            element: lazyLoad(() => import('../pages/plugins/editor')),
           },
         ],
       },
@@ -87,7 +86,7 @@ const router = createHashRouter([
       },
       {
         path: 'adapters/:adapterKey',
-        element: <RequireRole minRole={2}><AdapterLayout /></RequireRole>,
+        element: <AdapterLayout />,
         children: [
           {
             index: true,
@@ -101,7 +100,7 @@ const router = createHashRouter([
       },
       {
         path: 'settings',
-        element: <RequireRole minRole={2}>{lazyLoad(() => import('../pages/settings'))}</RequireRole>,
+        element: lazyLoad(() => import('../pages/settings')),
         children: [
           {
             index: true,

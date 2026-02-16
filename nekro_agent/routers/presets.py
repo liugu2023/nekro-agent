@@ -107,7 +107,7 @@ def _preset_detail(preset: DBPreset) -> PresetDetail:
 
 
 @router.get("/tags", summary="获取所有可用的人设标签", response_model=List[TagInfo])
-@require_role(Role.User)
+@require_role(Role.Admin)
 async def get_all_preset_tags(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> List[TagInfo]:
@@ -126,7 +126,7 @@ async def get_all_preset_tags(
 
 
 @router.get("/list", summary="获取人设列表", response_model=PresetListResponse)
-@require_role(Role.User)
+@require_role(Role.Admin)
 async def get_preset_list(
     page: int = 1,
     page_size: int = 20,
@@ -164,7 +164,7 @@ async def get_preset_list(
 
 
 @router.get("/{preset_id}", summary="获取人设详情", response_model=PresetDetail)
-@require_role(Role.User)
+@require_role(Role.Admin)
 async def get_preset_detail(
     preset_id: int,
     _current_user: DBUser = Depends(get_current_active_user),
