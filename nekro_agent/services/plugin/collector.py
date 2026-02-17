@@ -425,6 +425,14 @@ class PluginCollector:
         # 提取模块名称（最后一个点号之后的部分，用于UI显示）
         module_name = module_path.split(".")[-1]
 
+        # 清理 sys.modules 中该模块及其所有子模块，确保 import_module 执行最新代码
+        prefix = module_path + "."
+        stale_mods = [key for key in sys.modules if key == module_path or key.startswith(prefix)]
+        for key in stale_mods:
+            sys.modules.pop(key, None)
+        if stale_mods:
+            logger.debug(f"已从 sys.modules 清理旧模块: {stale_mods}")
+
         try:
             module = import_module(module_path)
         except Exception as e:
