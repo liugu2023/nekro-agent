@@ -77,6 +77,7 @@ import {
   CARD_VARIANTS,
 } from '../../theme/variants'
 import { useNotification } from '../../hooks/useNotification'
+import { useAuthStore } from '../../stores/auth'
 import { useTranslation } from 'react-i18next'
 import { getLocalizedText } from '../../services/api/types'
 import { copyText } from '../../utils/clipboard'
@@ -1335,6 +1336,8 @@ export default function PluginsManagementPage() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const notification = useNotification()
   const { t, i18n } = useTranslation('plugins')
+  const { userInfo } = useAuthStore()
+  const isAdmin = (userInfo?.perm_level ?? 0) >= 2
 
   // 获取插件列表 - 只获取基础列表，不获取详情
   const { data: plugins = [], isLoading } = useQuery({
