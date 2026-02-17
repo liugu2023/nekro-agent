@@ -100,10 +100,15 @@ async def get_user_name(
                 user_id=user_id,
                 no_cache=False,
             )
+            user_name = user_info.get("nickname", None)
+            user_name = user_info.get("card", None) or user_name
         else:
-            raise ValueError("获取群成员信息失败")
-        user_name = user_info.get("nickname", None)
-        user_name = user_info.get("card", None) or user_name
+            # 私聊通知事件，通过 get_stranger_info 获取昵称
+            user_info = await bot.get_stranger_info(
+                user_id=int(user_id),
+                no_cache=False,
+            )
+            user_name = user_info.get("nickname", None)
     else:
         user_name = (
             event.sender.nickname if not isinstance(event, GroupUploadNoticeEvent) and event.sender else event.get_user_id()
@@ -137,8 +142,14 @@ async def get_chat_info(
     event: Union[MessageEvent, GroupIncreaseNoticeEvent, GroupUploadNoticeEvent, NoticeEvent],
 ) -> Tuple[str, ChatType]:
     """获取频道信息"""
-    if isinstance(event, (GroupUploadNoticeEvent, GroupIncreaseNoticeEvent, NoticeEvent)):
+    if isinstance(event, (GroupUploadNoticeEvent, GroupIncreaseNoticeEvent)):
         raw_chat_type = "group"
+    elif isinstance(event, NoticeEvent):
+        # group_id 为 None 或 0 均视为私聊通知
+        if getattr(event, "group_id", None):
+            raw_chat_type = "group"
+        else:
+            raw_chat_type = "private"
     else:
         raw_chat_type = event.message_type
     chat_type: ChatType
@@ -164,8 +175,14 @@ async def get_chat_info_old(
 
     直接返回完整频道标识适配旧功能需求
     """
-    if isinstance(event, (GroupUploadNoticeEvent, GroupIncreaseNoticeEvent, NoticeEvent)):
+    if isinstance(event, (GroupUploadNoticeEvent, GroupIncreaseNoticeEvent)):
         raw_chat_type = "group"
+    elif isinstance(event, NoticeEvent):
+        # group_id 为 None 或 0 均视为私聊通知
+        if getattr(event, "group_id", None):
+            raw_chat_type = "group"
+        else:
+            raw_chat_type = "private"
     else:
         raw_chat_type = event.message_type
     chat_type: ChatType
