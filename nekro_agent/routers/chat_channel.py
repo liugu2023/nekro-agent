@@ -5,16 +5,18 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel
 from tortoise.expressions import Q
 
+from nekro_agent.adapters import get_adapter
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_user import DBUser
+from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.schemas.errors import NotFoundError
 from nekro_agent.services.user.deps import get_current_active_user
 from nekro_agent.services.user.perm import Role, require_role
 
 router = APIRouter(prefix="/chat-channel", tags=["ChatChannel"])
 
-logger = __import__("nekro_agent.core.logger", fromlist=["get_sub_logger"]).get_sub_logger("chat_channel_api")
+logger = get_sub_logger("chat_channel_api")
 
 
 class ChatChannelItem(BaseModel):
@@ -165,8 +167,6 @@ async def get_chat_channel_detail(chat_key: str, _current_user: DBUser = Depends
     # 检测适配器是否支持 WebUI 发送
     can_send = False
     try:
-        from nekro_agent.adapters import get_adapter
-
         adapter = get_adapter(channel.adapter_key)
         can_send = adapter.supports_webui_send
     except Exception:
@@ -305,8 +305,6 @@ async def send_message_to_channel(
 
     # 检测适配器是否支持 WebUI 发送
     try:
-        from nekro_agent.adapters import get_adapter
-
         adapter = get_adapter(channel.adapter_key)
         if not adapter.supports_webui_send:
             return SendMessageResponse(ok=False, error="当前适配器不支持从 WebUI 发送消息")
@@ -320,12 +318,10 @@ async def send_message_to_channel(
     try:
         from pathlib import Path
 
-        from nekro_agent.adapters.utils import adapter_utils
         from nekro_agent.core.os_env import USER_UPLOAD_DIR
         from nekro_agent.schemas.agent_message import AgentMessageSegment, AgentMessageSegmentType
         from nekro_agent.services.chat.universal_chat_service import universal_chat_service
 
-        adapter = await adapter_utils.get_adapter_for_chat(chat_key)
         segments: list[AgentMessageSegment] = []
 
         # 文本段
@@ -335,13 +331,17 @@ async def send_message_to_channel(
         # 文件段
         is_file_mode = False
         if file and file.filename:
-            upload_dir = Path(USER_UPLOAD_DIR) / chat_key
+            safe_chat_key = Path(chat_key).name
+            safe_filename = Path(file.filename).name
+            upload_dir = Path(USER_UPLOAD_DIR) / safe_chat_key
             upload_dir.mkdir(parents=True, exist_ok=True)
-            save_path = upload_dir / file.filename
-            content = await file.read()
-            save_path.write_bytes(content)
+            save_path = upload_dir / safe_filename
+            # 分块写入，避免大文件一次性占满内存
+            with save_path.open("wb") as f:
+                while chunk := await file.read(1024 * 1024):
+                    f.write(chunk)
             # 使用沙盒风格路径（/app/uploads/filename），让 _preprocess_messages 的 convert_to_host_path 正确转换
-            segments.append(AgentMessageSegment(type=AgentMessageSegmentType.FILE, content=f"/app/uploads/{file.filename}"))
+            segments.append(AgentMessageSegment(type=AgentMessageSegmentType.FILE, content=f"/app/uploads/{safe_filename}"))
             # 非图片文件使用 FILE 模式发送
             is_file_mode = not (file.content_type or "").startswith("image/")
 

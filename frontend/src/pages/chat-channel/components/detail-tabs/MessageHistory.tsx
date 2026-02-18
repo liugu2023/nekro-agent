@@ -91,11 +91,6 @@ function getUploadUrl(chatKey: string, segment: ChatMessageSegment): string {
   return `/api/common/uploads/${encodeURIComponent(chatKey)}/${encodeURIComponent(fileName)}`
 }
 
-/** 判断消息是否包含媒体内容 */
-function hasMediaContent(segments: ChatMessageSegment[]): boolean {
-  return segments.some(s => s.type === 'image' || s.type === 'file' || s.type === 'voice' || s.type === 'video')
-}
-
 /** 根据文件名获取文件类型信息（图标组件、颜色、标签） */
 function getFileTypeInfo(fileName: string): { IconComponent: React.ElementType; color: string; label: string } {
   const ext = fileName.split('.').pop()?.toLowerCase() || ''
@@ -209,10 +204,9 @@ function MessageContent({
   const [previewSrc, setPreviewSrc] = useState<string | null>(null)
 
   const segments = message.content_data || []
-  const hasMedia = hasMediaContent(segments)
 
-  // 没有富媒体数据时回退到纯文本
-  if (!hasMedia) {
+  // 没有 content_data 时回退到纯文本
+  if (segments.length === 0) {
     return (
       <>
         <Typography
@@ -347,6 +341,7 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
   const [inputValue, setInputValue] = useState('')
   const [sending, setSending] = useState(false)
   const [attachedFile, setAttachedFile] = useState<File | null>(null)
+  const [filePreviewUrl, setFilePreviewUrl] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
     open: false,
@@ -355,6 +350,17 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
   })
 
   const isDark = theme.palette.mode === 'dark'
+
+  // 管理附件预览 Blob URL 生命周期
+  useEffect(() => {
+    if (!attachedFile || !attachedFile.type.startsWith('image/')) {
+      setFilePreviewUrl(null)
+      return
+    }
+    const url = URL.createObjectURL(attachedFile)
+    setFilePreviewUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [attachedFile])
 
   // 查询消息历史
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } = useInfiniteQuery({
@@ -725,9 +731,9 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
             color: theme.palette.text.secondary,
           }}
         >
-          {attachedFile.type.startsWith('image/') ? (
+          {attachedFile.type.startsWith('image/') && filePreviewUrl ? (
             <img
-              src={URL.createObjectURL(attachedFile)}
+              src={filePreviewUrl}
               alt="preview"
               style={{ height: 40, borderRadius: 4, objectFit: 'cover' }}
             />
