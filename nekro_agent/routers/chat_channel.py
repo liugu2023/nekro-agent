@@ -281,6 +281,48 @@ async def set_chat_channel_preset(
     return ActionResponse(ok=True)
 
 
+class ChatChannelUser(BaseModel):
+    """聊天频道用户"""
+    platform_userid: str
+    nickname: str
+
+
+class ChatChannelUsersResponse(BaseModel):
+    """聊天频道用户列表"""
+    total: int
+    items: List[ChatChannelUser]
+
+
+@router.get("/{chat_key}/users", summary="获取聊天频道用户列表")
+async def get_chat_channel_users(
+    chat_key: str,
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> ChatChannelUsersResponse:
+    """获取聊天频道内的所有用户（按昵称）"""
+    channel = await DBChatChannel.get_or_none(chat_key=chat_key)
+    if not channel:
+        raise NotFoundError(resource="聊天频道")
+
+    # 从消息表查询该频道的所有独特用户
+    messages = await DBChatMessage.filter(chat_key=chat_key).distinct().values_list(
+        'platform_userid', 'sender_nickname'
+    )
+
+    # 去重并排序
+    users_dict: Dict[str, str] = {}
+    for userid, nickname in messages:
+        if userid and userid != '-1' and nickname and nickname != 'SYSTEM':
+            users_dict[userid] = nickname
+
+    # 按昵称排序
+    items = [
+        ChatChannelUser(platform_userid=uid, nickname=nickname)
+        for uid, nickname in sorted(users_dict.items(), key=lambda x: x[1])
+    ]
+
+    return ChatChannelUsersResponse(total=len(items), items=items)
+
+
 class SendMessageRequest(BaseModel):
     message: str
 
