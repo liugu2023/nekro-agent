@@ -338,8 +338,10 @@ async def send_message_to_channel(
             upload_dir = Path(USER_UPLOAD_DIR) / chat_key
             upload_dir.mkdir(parents=True, exist_ok=True)
             save_path = upload_dir / file.filename
-            content = await file.read()
-            save_path.write_bytes(content)
+            # 分块写入，避免大文件一次性占满内存
+            with save_path.open("wb") as f:
+                while chunk := await file.read(1024 * 1024):
+                    f.write(chunk)
             # 使用沙盒风格路径（/app/uploads/filename），让 _preprocess_messages 的 convert_to_host_path 正确转换
             segments.append(AgentMessageSegment(type=AgentMessageSegmentType.FILE, content=f"/app/uploads/{file.filename}"))
             # 非图片文件使用 FILE 模式发送

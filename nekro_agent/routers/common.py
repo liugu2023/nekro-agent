@@ -121,7 +121,7 @@ async def get_upload_file(
     chat_key: str,
     filename: str,
 ):
-    """获取聊天上传文件（无需鉴权，文件名为 MD5 哈希）"""
+    """获取聊天上传文件（无需鉴权，供 img 标签等直接访问）"""
     # 防止路径穿越
     safe_chat_key = Path(chat_key).name
     safe_filename = Path(filename).name
