@@ -16,13 +16,26 @@ export interface ChatChannelDetail extends ChatChannel {
   unique_users: number
   conversation_start_time: string
   preset_id?: number | null
+  can_send?: boolean
+}
+
+export interface ChatMessageSegment {
+  type: string        // "text" | "image" | "file" | "voice" | "video" | "at" | "reference" | "json_card"
+  text: string
+  file_name?: string
+  local_path?: string
+  remote_url?: string
 }
 
 export interface ChatMessage {
   id: number
   sender_id: string
   sender_name: string
+  sender_nickname: string
+  platform_userid: string
   content: string
+  content_data: ChatMessageSegment[]
+  chat_key: string
   create_time: string
 }
 
@@ -38,6 +51,7 @@ export interface ChatMessageListResponse {
 
 export interface ActionResponse {
   ok: boolean
+  error?: string
 }
 
 export const chatChannelApi = {
@@ -90,6 +104,18 @@ export const chatChannelApi = {
   setPreset: async (chatKey: string, presetId: number | null): Promise<ActionResponse> => {
     const response = await axios.post<ActionResponse>(`/chat-channel/${chatKey}/preset`, null, {
       params: { preset_id: presetId },
+    })
+    return response.data
+  },
+
+  sendMessage: async (chatKey: string, message: string, file?: File): Promise<ActionResponse> => {
+    const formData = new FormData()
+    formData.append('message', message)
+    if (file) {
+      formData.append('file', file)
+    }
+    const response = await axios.post<ActionResponse>(`/chat-channel/${chatKey}/send`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
     })
     return response.data
   },

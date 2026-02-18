@@ -256,20 +256,30 @@ class MessageService:
                 file_path = Path(msg.content)
                 if file_path.exists():
                     mime_type = magic.from_buffer(file_path.read_bytes(), mime=True)
-                    if mime_type.startswith("image/"):
-                        # 复制文件到uploads目录
-                        local_path, file_name = await copy_to_upload_dir(
-                            str(file_path),
-                            file_name=file_path.name,
-                            from_chat_key=chat_key,
-                        )
+                    # 复制文件到uploads目录
+                    local_path, file_name = await copy_to_upload_dir(
+                        str(file_path),
+                        file_name=file_path.name,
+                        from_chat_key=chat_key,
+                    )
 
+                    if mime_type.startswith("image/"):
                         content_data.append(
                             {
                                 "type": "image",
                                 "text": "",
                                 "file_name": file_name,
-                                "local_path": local_path,  # 使用复制后的路径
+                                "local_path": local_path,
+                                "remote_url": "",
+                            },
+                        )
+                    else:
+                        content_data.append(
+                            {
+                                "type": "file",
+                                "text": f"[File: {file_name}]",
+                                "file_name": file_name,
+                                "local_path": local_path,
                                 "remote_url": "",
                             },
                         )

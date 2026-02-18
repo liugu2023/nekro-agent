@@ -1,6 +1,7 @@
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends
+import json5
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel
 from tortoise.expressions import Q
 
@@ -12,6 +13,8 @@ from nekro_agent.services.user.deps import get_current_active_user
 from nekro_agent.services.user.perm import Role, require_role
 
 router = APIRouter(prefix="/chat-channel", tags=["ChatChannel"])
+
+logger = __import__("nekro_agent.core.logger", fromlist=["get_sub_logger"]).get_sub_logger("chat_channel_api")
 
 
 class ChatChannelItem(BaseModel):
@@ -35,13 +38,18 @@ class ChatChannelDetail(ChatChannelItem):
     unique_users: int
     conversation_start_time: str
     preset_id: Optional[int]
+    can_send: bool = False
 
 
 class ChatMessage(BaseModel):
     id: int
     sender_id: str
     sender_name: str
+    sender_nickname: str
+    platform_userid: str
     content: str
+    content_data: List[Dict[str, Any]]
+    chat_key: str
     create_time: str
 
 
@@ -154,6 +162,16 @@ async def get_chat_channel_detail(chat_key: str, _current_user: DBUser = Depends
     last_message_time = last_message.create_time if last_message else None
     unique_users = await DBChatMessage.filter(chat_key=chat_key).distinct().values_list("sender_id", flat=True)
 
+    # 检测适配器是否支持 WebUI 发送
+    can_send = False
+    try:
+        from nekro_agent.adapters import get_adapter
+
+        adapter = get_adapter(channel.adapter_key)
+        can_send = adapter.supports_webui_send
+    except Exception:
+        pass
+
     return ChatChannelDetail(
         id=channel.id,
         chat_key=channel.chat_key,
@@ -167,6 +185,7 @@ async def get_chat_channel_detail(chat_key: str, _current_user: DBUser = Depends
         last_message_time=last_message_time.strftime("%Y-%m-%d %H:%M:%S") if last_message_time else None,
         conversation_start_time=channel.conversation_start_time.strftime("%Y-%m-%d %H:%M:%S"),
         preset_id=channel.preset_id,
+        can_send=can_send,
     )
 
 
@@ -221,6 +240,12 @@ async def get_chat_channel_messages(
     total = await query.count()
     messages = await query.order_by("-id").limit(page_size)
 
+    def _parse_content_data(raw: str) -> List[Dict[str, Any]]:
+        try:
+            return json5.loads(raw) if raw else []
+        except Exception:
+            return []
+
     return ChatMessageListResponse(
         total=total,
         items=[
@@ -228,7 +253,11 @@ async def get_chat_channel_messages(
                 id=msg.id,
                 sender_id=str(msg.sender_id),
                 sender_name=msg.sender_name,
+                sender_nickname=msg.sender_nickname or msg.sender_name,
+                platform_userid=msg.platform_userid or "",
                 content=msg.content_text,
+                content_data=_parse_content_data(msg.content_data),
+                chat_key=msg.chat_key,
                 create_time=msg.create_time.strftime("%Y-%m-%d %H:%M:%S"),
             )
             for msg in messages
@@ -250,3 +279,80 @@ async def set_chat_channel_preset(
 
     await channel.set_preset(preset_id)
     return ActionResponse(ok=True)
+
+
+class SendMessageRequest(BaseModel):
+    message: str
+
+
+class SendMessageResponse(BaseModel):
+    ok: bool = True
+    error: str = ""
+
+
+@router.post("/{chat_key}/send", summary="向聊天频道发送消息")
+@require_role(Role.Admin)
+async def send_message_to_channel(
+    chat_key: str,
+    message: str = Form(default=""),
+    file: Optional[UploadFile] = File(default=None),
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> SendMessageResponse:
+    """从 WebUI 向聊天频道发送消息（支持文本和/或文件）"""
+    channel = await DBChatChannel.get_or_none(chat_key=chat_key)
+    if not channel:
+        raise NotFoundError(resource="聊天频道")
+
+    # 检测适配器是否支持 WebUI 发送
+    try:
+        from nekro_agent.adapters import get_adapter
+
+        adapter = get_adapter(channel.adapter_key)
+        if not adapter.supports_webui_send:
+            return SendMessageResponse(ok=False, error="当前适配器不支持从 WebUI 发送消息")
+    except KeyError:
+        return SendMessageResponse(ok=False, error="适配器未加载")
+
+    text = message.strip()
+    if not text and not file:
+        return SendMessageResponse(ok=False, error="消息内容不能为空")
+
+    try:
+        from pathlib import Path
+
+        from nekro_agent.adapters.utils import adapter_utils
+        from nekro_agent.core.os_env import USER_UPLOAD_DIR
+        from nekro_agent.schemas.agent_message import AgentMessageSegment, AgentMessageSegmentType
+        from nekro_agent.services.chat.universal_chat_service import universal_chat_service
+
+        adapter = await adapter_utils.get_adapter_for_chat(chat_key)
+        segments: list[AgentMessageSegment] = []
+
+        # 文本段
+        if text:
+            segments.append(AgentMessageSegment(type=AgentMessageSegmentType.TEXT, content=text))
+
+        # 文件段
+        is_file_mode = False
+        if file and file.filename:
+            upload_dir = Path(USER_UPLOAD_DIR) / chat_key
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            save_path = upload_dir / file.filename
+            content = await file.read()
+            save_path.write_bytes(content)
+            # 使用沙盒风格路径（/app/uploads/filename），让 _preprocess_messages 的 convert_to_host_path 正确转换
+            segments.append(AgentMessageSegment(type=AgentMessageSegmentType.FILE, content=f"/app/uploads/{file.filename}"))
+            # 非图片文件使用 FILE 模式发送
+            is_file_mode = not (file.content_type or "").startswith("image/")
+
+        await universal_chat_service.send_agent_message(
+            chat_key=chat_key,
+            messages=segments,
+            adapter=adapter,
+            record=True,
+            file_mode=is_file_mode,
+        )
+        return SendMessageResponse(ok=True)
+    except Exception as e:
+        logger.error(f"WebUI 发送消息到 {chat_key} 失败: {e}")
+        return SendMessageResponse(ok=False, error=str(e))
