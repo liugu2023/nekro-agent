@@ -92,6 +92,10 @@
   "messageHistory": {
     "noMessages": "No message history",
     "noContent": "[No text content]",
-    "scrollToBottom": "Scroll to bottom"
+    "scrollToBottom": "Scroll to bottom",
+    "inputPlaceholder": "Type a message...",
+    "send": "Send",
+    "sendSuccess": "Message sent",
+    "sendFailed": "Failed to send"
   }
 }

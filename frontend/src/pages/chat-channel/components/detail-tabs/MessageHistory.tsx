@@ -1,26 +1,36 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Box,
   Typography,
-  List,
-  ListItem,
-  ListItemText,
-  ListItemAvatar,
   Avatar,
   CircularProgress,
-  Stack,
   useTheme,
   Button,
+  Dialog,
+  TextField,
+  IconButton,
+  Snackbar,
+  Alert,
+  Tooltip,
 } from '@mui/material'
-import { useInfiniteQuery } from '@tanstack/react-query'
-import { chatChannelApi, ChatMessage } from '../../../../services/api/chat-channel'
+import SendIcon from '@mui/icons-material/Send'
+import AttachFileIcon from '@mui/icons-material/AttachFile'
+import CloseIcon from '@mui/icons-material/Close'
+import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf'
+import DescriptionIcon from '@mui/icons-material/Description'
+import AudioFileIcon from '@mui/icons-material/AudioFile'
+import VideoFileIcon from '@mui/icons-material/VideoFile'
+import FolderZipIcon from '@mui/icons-material/FolderZip'
+import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import { chatChannelApi, ChatMessage, ChatMessageSegment } from '../../../../services/api/chat-channel'
 import { useTranslation } from 'react-i18next'
 
 // 防抖函数
-const debounce = <T extends (...args: unknown[]) => unknown>(
+function debounce<T extends (...args: unknown[]) => unknown>(
   fn: T,
   delay: number
-): ((...args: Parameters<T>) => void) => {
+): (...args: Parameters<T>) => void {
   let timeoutId: number
   return (...args: Parameters<T>) => {
     window.clearTimeout(timeoutId)
@@ -30,6 +40,7 @@ const debounce = <T extends (...args: unknown[]) => unknown>(
 
 interface MessageHistoryProps {
   chatKey: string
+  canSend?: boolean
 }
 
 interface MessageResponse {
@@ -37,9 +48,293 @@ interface MessageResponse {
   items: ChatMessage[]
 }
 
-export default function MessageHistory({ chatKey }: MessageHistoryProps) {
+/** Bot 的 sender_id 固定为 "-1" */
+const BOT_SENDER_ID = '-1'
+
+/** 根据 platform_userid 生成 QQ 头像 URL */
+function getAvatarUrl(platformUserid: string): string | undefined {
+  if (!platformUserid || platformUserid === '-1') return undefined
+  // QQ 头像
+  if (/^\d{5,}$/.test(platformUserid)) {
+    return `https://q1.qlogo.cn/g?b=qq&nk=${platformUserid}&s=100`
+  }
+  return undefined
+}
+
+/** 判断两条消息之间是否需要时间分隔（>5 分钟） */
+function needTimeDivider(prev: ChatMessage, curr: ChatMessage): boolean {
+  const t1 = new Date(prev.create_time).getTime()
+  const t2 = new Date(curr.create_time).getTime()
+  return t2 - t1 > 5 * 60 * 1000
+}
+
+/** 名字生成稳定色相 */
+function nameToColor(name: string): string {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  const hue = Math.abs(hash) % 360
+  return `hsl(${hue}, 55%, 55%)`
+}
+
+/** 从 local_path 提取文件名 */
+function extractFileName(localPath: string): string {
+  const parts = localPath.replace(/\\/g, '/').split('/')
+  return parts[parts.length - 1] || ''
+}
+
+/** 构造上传文件的 API URL */
+function getUploadUrl(chatKey: string, segment: ChatMessageSegment): string {
+  const fileName = segment.file_name || (segment.local_path ? extractFileName(segment.local_path) : '')
+  if (!fileName) return ''
+  return `/api/common/uploads/${encodeURIComponent(chatKey)}/${encodeURIComponent(fileName)}`
+}
+
+/** 判断消息是否包含媒体内容 */
+function hasMediaContent(segments: ChatMessageSegment[]): boolean {
+  return segments.some(s => s.type === 'image' || s.type === 'file' || s.type === 'voice' || s.type === 'video')
+}
+
+/** 根据文件名获取文件类型信息（图标组件、颜色、标签） */
+function getFileTypeInfo(fileName: string): { IconComponent: React.ElementType; color: string; label: string } {
+  const ext = fileName.split('.').pop()?.toLowerCase() || ''
+  switch (ext) {
+    case 'pdf':
+      return { IconComponent: PictureAsPdfIcon, color: '#e53935', label: 'PDF' }
+    case 'doc': case 'docx':
+      return { IconComponent: DescriptionIcon, color: '#1565c0', label: 'Word' }
+    case 'xls': case 'xlsx':
+      return { IconComponent: DescriptionIcon, color: '#2e7d32', label: 'Excel' }
+    case 'ppt': case 'pptx':
+      return { IconComponent: DescriptionIcon, color: '#d84315', label: 'PPT' }
+    case 'zip': case 'rar': case '7z': case 'tar': case 'gz':
+      return { IconComponent: FolderZipIcon, color: '#6d4c41', label: ext.toUpperCase() }
+    case 'mp3': case 'wav': case 'flac': case 'ogg': case 'aac':
+      return { IconComponent: AudioFileIcon, color: '#7b1fa2', label: ext.toUpperCase() }
+    case 'mp4': case 'avi': case 'mkv': case 'mov': case 'webm':
+      return { IconComponent: VideoFileIcon, color: '#c62828', label: ext.toUpperCase() }
+    case 'txt': case 'md': case 'json': case 'csv': case 'log':
+      return { IconComponent: DescriptionIcon, color: '#546e7a', label: ext.toUpperCase() }
+    default:
+      return { IconComponent: InsertDriveFileIcon, color: '#78909c', label: ext ? ext.toUpperCase() : 'FILE' }
+  }
+}
+
+/** 文件卡片组件 */
+function FileCard({
+  segment,
+  isDark,
+}: {
+  segment: ChatMessageSegment
+  isDark: boolean
+}) {
+  const theme = useTheme()
+  const fileName = segment.file_name || segment.text || 'file'
+  const fileInfo = getFileTypeInfo(fileName)
+  const FileIcon = fileInfo.IconComponent
+
+  return (
+    <Box
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 1.5,
+        my: 0.5,
+        p: 1.2,
+        borderRadius: '10px',
+        bgcolor: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.03)',
+        border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'}`,
+        minWidth: 200,
+        maxWidth: 320,
+      }}
+    >
+      {/* 文件图标 */}
+      <Box
+        sx={{
+          width: 44,
+          height: 44,
+          borderRadius: '8px',
+          bgcolor: `${fileInfo.color}18`,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+          color: fileInfo.color,
+        }}
+      >
+        <FileIcon sx={{ fontSize: 32 }} />
+      </Box>
+
+      {/* 文件信息 */}
+      <Box sx={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+        <Tooltip title={fileName} placement="top">
+          <Typography
+            variant="body2"
+            sx={{
+              fontSize: '13px',
+              fontWeight: 500,
+              color: theme.palette.text.primary,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {fileName}
+          </Typography>
+        </Tooltip>
+        <Typography
+          variant="caption"
+          sx={{
+            fontSize: '11px',
+            color: theme.palette.text.disabled,
+          }}
+        >
+          {fileInfo.label}
+        </Typography>
+      </Box>
+    </Box>
+  )
+}
+
+/** 渲染消息内容（支持图文混排） */
+function MessageContent({
+  message,
+  noContentText,
+}: {
+  message: ChatMessage
+  noContentText: string
+}) {
+  const theme = useTheme()
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null)
+
+  const segments = message.content_data || []
+  const hasMedia = hasMediaContent(segments)
+
+  // 没有富媒体数据时回退到纯文本
+  if (!hasMedia) {
+    return (
+      <>
+        <Typography
+          variant="body2"
+          sx={{
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            overflowWrap: 'break-word',
+            fontSize: '13.5px',
+            lineHeight: 1.6,
+            color: message.content
+              ? theme.palette.text.primary
+              : theme.palette.text.disabled,
+            fontStyle: message.content ? 'normal' : 'italic',
+          }}
+        >
+          {message.content || noContentText}
+        </Typography>
+      </>
+    )
+  }
+
+  return (
+    <>
+      {segments.map((seg, i) => {
+        if (seg.type === 'image') {
+          const src = getUploadUrl(message.chat_key, seg)
+          if (!src) return null
+          return (
+            <Box key={i} sx={{ my: 0.5 }}>
+              <img
+                src={src}
+                alt={seg.file_name || 'image'}
+                onClick={() => setPreviewSrc(src)}
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: 300,
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  display: 'block',
+                }}
+                loading="lazy"
+                onError={(e) => {
+                  const target = e.target as HTMLImageElement
+                  target.style.display = 'none'
+                }}
+              />
+            </Box>
+          )
+        }
+
+        if (seg.type === 'file' || seg.type === 'voice' || seg.type === 'video') {
+          return (
+            <FileCard
+              key={i}
+              segment={seg}
+              isDark={theme.palette.mode === 'dark'}
+            />
+          )
+        }
+
+        // text / at / 其他：渲染文本
+        if (seg.text) {
+          return (
+            <Typography
+              key={i}
+              variant="body2"
+              component="span"
+              sx={{
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                overflowWrap: 'break-word',
+                fontSize: '13.5px',
+                lineHeight: 1.6,
+                color: theme.palette.text.primary,
+              }}
+            >
+              {seg.text}
+            </Typography>
+          )
+        }
+
+        return null
+      })}
+
+      {/* 图片预览弹窗 */}
+      {previewSrc && (
+        <Dialog
+          open
+          onClose={() => setPreviewSrc(null)}
+          maxWidth={false}
+          PaperProps={{
+            sx: {
+              bgcolor: 'transparent',
+              boxShadow: 'none',
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+            },
+          }}
+        >
+          <img
+            src={previewSrc}
+            alt="preview"
+            onClick={() => setPreviewSrc(null)}
+            style={{
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+              objectFit: 'contain',
+              cursor: 'pointer',
+              borderRadius: 4,
+            }}
+          />
+        </Dialog>
+      )}
+    </>
+  )
+}
+
+export default function MessageHistory({ chatKey, canSend = false }: MessageHistoryProps) {
   const { t } = useTranslation('chat-channel')
   const theme = useTheme()
+  const queryClient = useQueryClient()
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
   const loadMoreRef = useRef<HTMLDivElement>(null)
@@ -47,6 +342,19 @@ export default function MessageHistory({ chatKey }: MessageHistoryProps) {
   const [initialLoad, setInitialLoad] = useState(true)
   const prevScrollHeightRef = useRef<number>(0)
   const isLoadingMoreRef = useRef(false)
+
+  // 发送消息状态
+  const [inputValue, setInputValue] = useState('')
+  const [sending, setSending] = useState(false)
+  const [attachedFile, setAttachedFile] = useState<File | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [snack, setSnack] = useState<{ open: boolean; message: string; severity: 'success' | 'error' }>({
+    open: false,
+    message: '',
+    severity: 'success',
+  })
+
+  const isDark = theme.palette.mode === 'dark'
 
   // 查询消息历史
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isLoading } = useInfiniteQuery({
@@ -93,11 +401,9 @@ export default function MessageHistory({ chatKey }: MessageHistoryProps) {
 
     const { scrollHeight, scrollTop, clientHeight } = container
 
-    // 更新自动滚动状态
     const isNearBottom = scrollHeight - scrollTop - clientHeight < 100
     setAutoScroll(isNearBottom)
 
-    // 检测是否接近顶部
     if (scrollTop < 50 && !isFetchingNextPage && hasNextPage) {
       handleLoadMore()
     }
@@ -132,6 +438,44 @@ export default function MessageHistory({ chatKey }: MessageHistoryProps) {
     setAutoScroll(true)
   }, [])
 
+  // 发送消息
+  const handleSend = useCallback(async () => {
+    const msg = inputValue.trim()
+    if (!msg && !attachedFile) return
+    if (sending) return
+    setSending(true)
+    try {
+      const res = await chatChannelApi.sendMessage(chatKey, msg, attachedFile || undefined)
+      if (res.ok) {
+        setInputValue('')
+        setAttachedFile(null)
+        setSnack({ open: true, message: t('messageHistory.sendSuccess'), severity: 'success' })
+        // 刷新消息列表
+        await queryClient.invalidateQueries({ queryKey: ['chat-messages', chatKey] })
+        // 滚动到底部
+        setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 300)
+      } else {
+        setSnack({ open: true, message: `${t('messageHistory.sendFailed')}: ${res.error || ''}`, severity: 'error' })
+      }
+    } catch (e: unknown) {
+      const errMsg = e instanceof Error ? e.message : String(e)
+      setSnack({ open: true, message: `${t('messageHistory.sendFailed')}: ${errMsg}`, severity: 'error' })
+    } finally {
+      setSending(false)
+    }
+  }, [inputValue, attachedFile, sending, chatKey, queryClient, t])
+
+  // 回车发送
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        handleSend()
+      }
+    },
+    [handleSend]
+  )
+
   if (isLoading) {
     return (
       <Box className="h-full flex items-center justify-center">
@@ -140,16 +484,27 @@ export default function MessageHistory({ chatKey }: MessageHistoryProps) {
     )
   }
 
-  // 按时间正序排列消息
+  // 按时间正序排列消息，过滤掉 SYSTEM 内部消息（agent 方法返回等）
   const allMessages =
     data?.pages
       .flatMap(page => page.items)
+      .filter(msg => msg.sender_name !== 'SYSTEM')
       .sort((a, b) => new Date(a.create_time).getTime() - new Date(b.create_time).getTime()) || []
 
   return (
     <Box className="h-full flex flex-col overflow-hidden relative">
       {/* 消息列表容器 */}
-      <Box ref={containerRef} className="flex-1 overflow-y-auto">
+      <Box
+        ref={containerRef}
+        className="flex-1 overflow-y-auto"
+        sx={{
+          px: { xs: 1, sm: 2 },
+          py: 1,
+          background: isDark
+            ? 'linear-gradient(180deg, rgba(0,0,0,0.15) 0%, transparent 100%)'
+            : 'linear-gradient(180deg, rgba(0,0,0,0.02) 0%, transparent 100%)',
+        }}
+      >
         {/* 加载更多提示 */}
         {(hasNextPage || isFetchingNextPage) && allMessages.length >= 32 && (
           <Box ref={loadMoreRef} className="p-2 flex justify-center">
@@ -159,72 +514,172 @@ export default function MessageHistory({ chatKey }: MessageHistoryProps) {
 
         {/* 消息列表 */}
         {allMessages.length === 0 ? (
-          <Box className="p-4 flex items-center justify-center">
+          <Box className="p-4 flex items-center justify-center h-full">
             <Typography color="textSecondary">{t('messageHistory.noMessages')}</Typography>
           </Box>
         ) : (
-          <List>
-            {allMessages.map(message => (
-              <ListItem
-                key={message.id}
-                sx={{
-                  transition: 'background-color 0.2s',
-                  '&:hover': {
-                    backgroundColor:
-                      theme.palette.mode === 'dark'
-                        ? 'rgba(255, 255, 255, 0.05)'
-                        : 'rgba(0, 0, 0, 0.02)',
-                  },
-                  alignItems: 'flex-start',
-                  paddingTop: 2,
-                  paddingBottom: 2,
-                }}
-              >
-                <ListItemAvatar sx={{ mt: 0 }}>
-                  <Avatar
-                    sx={{
-                      bgcolor:
-                        theme.palette.mode === 'dark'
-                          ? 'rgba(255, 255, 255, 0.1)'
-                          : 'rgba(0, 0, 0, 0.08)',
-                    }}
-                  >
-                    {message.sender_name[0]}
-                  </Avatar>
-                </ListItemAvatar>
-                <ListItemText
-                  sx={{ mt: 0 }}
-                  primary={
-                    <Stack direction="row" spacing={1} alignItems="center" className="mb-1">
-                      <Typography variant="body1" className="font-medium">
-                        {message.sender_name}
-                      </Typography>
-                      <Typography variant="caption" color="textSecondary" className="flex-shrink-0">
-                        {message.create_time}
-                      </Typography>
-                    </Stack>
-                  }
-                  secondary={
-                    <Typography
-                      variant="body2"
-                      style={{
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                        overflowWrap: 'break-word',
-                      }}
-                      color="textSecondary"
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {allMessages.map((message, index) => {
+              const isBot = message.sender_id === BOT_SENDER_ID
+              const prevMsg = index > 0 ? allMessages[index - 1] : null
+              const showDivider = prevMsg && needTimeDivider(prevMsg, message)
+              // 同一发送者连续消息合并头像
+              const isContinuation =
+                prevMsg &&
+                !showDivider &&
+                prevMsg.sender_id === message.sender_id
+
+              return (
+                <Box key={message.id}>
+                  {/* 时间分隔线 */}
+                  {showDivider && (
+                    <Box
                       sx={{
-                        opacity: message.content ? 1 : 0.5,
-                        fontStyle: message.content ? 'normal' : 'italic',
+                        display: 'flex',
+                        justifyContent: 'center',
+                        py: 1.5,
+                        my: 0.5,
                       }}
                     >
-                      {message.content || t('messageHistory.noContent')}
-                    </Typography>
-                  }
-                />
-              </ListItem>
-            ))}
-          </List>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          color: theme.palette.text.disabled,
+                          fontSize: '11px',
+                          background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                          px: 1.5,
+                          py: 0.3,
+                          borderRadius: '10px',
+                        }}
+                      >
+                        {message.create_time}
+                      </Typography>
+                    </Box>
+                  )}
+
+                  {/* 气泡布局 */}
+                  <Box
+                      sx={{
+                        display: 'flex',
+                        flexDirection: isBot ? 'row-reverse' : 'row',
+                        alignItems: 'flex-start',
+                        gap: 1,
+                        px: 1,
+                        mt: isContinuation ? 0 : 1,
+                      }}
+                    >
+                      {/* 头像 */}
+                      {isContinuation ? (
+                        // 连续消息占位
+                        <Box sx={{ width: 36, height: 36, flexShrink: 0 }} />
+                      ) : (
+                        <Avatar
+                          src={getAvatarUrl(message.platform_userid)}
+                          sx={{
+                            width: 36,
+                            height: 36,
+                            flexShrink: 0,
+                            fontSize: '14px',
+                            fontWeight: 600,
+                            bgcolor: isBot
+                              ? theme.palette.primary.main
+                              : nameToColor(message.sender_name),
+                            mt: 0.3,
+                          }}
+                        >
+                          {message.sender_name?.[0] ?? '?'}
+                        </Avatar>
+                      )}
+
+                      {/* 内容区 */}
+                      <Box
+                        sx={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: isBot ? 'flex-end' : 'flex-start',
+                          maxWidth: '75%',
+                          minWidth: 0,
+                        }}
+                      >
+                        {/* 昵称 + 时间 */}
+                        {!isContinuation && (
+                          <Box
+                            sx={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 0.8,
+                              mb: 0.3,
+                              flexDirection: isBot ? 'row-reverse' : 'row',
+                            }}
+                          >
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                fontWeight: 600,
+                                fontSize: '12px',
+                                color: isBot
+                                  ? theme.palette.primary.main
+                                  : theme.palette.text.secondary,
+                              }}
+                            >
+                              {message.sender_nickname || message.sender_name}
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                fontSize: '11px',
+                                color: theme.palette.text.disabled,
+                              }}
+                            >
+                              {message.create_time}
+                            </Typography>
+                          </Box>
+                        )}
+
+                        {/* 气泡 */}
+                        <Box
+                          sx={{
+                            position: 'relative',
+                            background: isBot
+                              ? isDark
+                                ? 'rgba(56, 139, 253, 0.15)'
+                                : 'rgba(56, 139, 253, 0.08)'
+                              : isDark
+                                ? 'rgba(255, 255, 255, 0.06)'
+                                : 'rgba(0, 0, 0, 0.04)',
+                            borderRadius: isBot
+                              ? isContinuation
+                                ? '12px'
+                                : '12px 2px 12px 12px'
+                              : isContinuation
+                                ? '12px'
+                                : '2px 12px 12px 12px',
+                            px: 1.5,
+                            py: 0.8,
+                            maxWidth: '100%',
+                            transition: 'background 0.15s',
+                            '&:hover': {
+                              background: isBot
+                                ? isDark
+                                  ? 'rgba(56, 139, 253, 0.22)'
+                                  : 'rgba(56, 139, 253, 0.13)'
+                                : isDark
+                                  ? 'rgba(255, 255, 255, 0.1)'
+                                  : 'rgba(0, 0, 0, 0.06)',
+                            },
+                          }}
+                        >
+                          <MessageContent
+                            message={message}
+                            noContentText={t('messageHistory.noContent')}
+                          />
+                        </Box>
+                      </Box>
+                    </Box>
+                </Box>
+              )
+            })}
+          </Box>
         )}
         <div ref={messagesEndRef} />
       </Box>
@@ -234,7 +689,7 @@ export default function MessageHistory({ chatKey }: MessageHistoryProps) {
         <Box
           sx={{
             position: 'absolute',
-            bottom: 16,
+            bottom: canSend ? 72 : 16,
             right: 16,
             zIndex: theme.zIndex.fab,
           }}
@@ -254,6 +709,119 @@ export default function MessageHistory({ chatKey }: MessageHistoryProps) {
           </Button>
         </Box>
       )}
+
+      {/* 附件预览 */}
+      {canSend && attachedFile && (
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            px: 2,
+            py: 0.5,
+            borderTop: `1px solid ${theme.palette.divider}`,
+            bgcolor: isDark ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.01)',
+            fontSize: '12px',
+            color: theme.palette.text.secondary,
+          }}
+        >
+          {attachedFile.type.startsWith('image/') ? (
+            <img
+              src={URL.createObjectURL(attachedFile)}
+              alt="preview"
+              style={{ height: 40, borderRadius: 4, objectFit: 'cover' }}
+            />
+          ) : (
+            <span>📎</span>
+          )}
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {attachedFile.name}
+          </span>
+          <IconButton size="small" onClick={() => setAttachedFile(null)}>
+            <CloseIcon fontSize="small" />
+          </IconButton>
+        </Box>
+      )}
+
+      {/* 输入框 */}
+      {canSend && (
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 0.5,
+          px: 1.5,
+          py: 1,
+          borderTop: attachedFile ? 'none' : `1px solid ${theme.palette.divider}`,
+          bgcolor: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.02)',
+        }}
+      >
+        {/* 隐藏的文件输入 */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) setAttachedFile(f)
+            e.target.value = ''
+          }}
+        />
+        <IconButton
+          size="small"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={sending}
+          sx={{ color: theme.palette.text.secondary }}
+        >
+          <AttachFileIcon fontSize="small" />
+        </IconButton>
+        <TextField
+          fullWidth
+          size="small"
+          multiline
+          maxRows={3}
+          placeholder={t('messageHistory.inputPlaceholder')}
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          disabled={sending}
+          sx={{
+            '& .MuiOutlinedInput-root': {
+              borderRadius: '20px',
+              fontSize: '13.5px',
+            },
+          }}
+        />
+        <IconButton
+          color="primary"
+          onClick={handleSend}
+          disabled={(!inputValue.trim() && !attachedFile) || sending}
+          sx={{
+            width: 36,
+            height: 36,
+          }}
+        >
+          {sending ? <CircularProgress size={20} /> : <SendIcon fontSize="small" />}
+        </IconButton>
+      </Box>
+      )}
+
+      {/* 提示 */}
+      <Snackbar
+        open={snack.open}
+        autoHideDuration={3000}
+        onClose={() => setSnack(s => ({ ...s, open: false }))}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+      >
+        <Alert
+          severity={snack.severity}
+          onClose={() => setSnack(s => ({ ...s, open: false }))}
+          variant="filled"
+          sx={{ width: '100%' }}
+        >
+          {snack.message}
+        </Alert>
+      </Snackbar>
     </Box>
   )
 }
