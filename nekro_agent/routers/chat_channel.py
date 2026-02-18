@@ -378,9 +378,15 @@ async def send_message_to_channel(
             upload_dir = Path(USER_UPLOAD_DIR) / safe_chat_key
             upload_dir.mkdir(parents=True, exist_ok=True)
             save_path = upload_dir / safe_filename
-            # 分块写入，避免大文件一次性占满内存
+            # 分块写入，避免大文件一次性占满内存；同时检查文件大小上限
+            max_upload_size = 100 * 1024 * 1024  # 100 MB
+            total_size = 0
             with save_path.open("wb") as f:
                 while chunk := await file.read(1024 * 1024):
+                    total_size += len(chunk)
+                    if total_size > max_upload_size:
+                        save_path.unlink(missing_ok=True)
+                        return SendMessageResponse(ok=False, error="文件大小超过 100MB 限制")
                     f.write(chunk)
             # 使用沙盒风格路径（/app/uploads/filename），让 _preprocess_messages 的 convert_to_host_path 正确转换
             segments.append(AgentMessageSegment(type=AgentMessageSegmentType.FILE, content=f"/app/uploads/{safe_filename}"))

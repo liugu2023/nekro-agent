@@ -1,5 +1,11 @@
 import axios from './axios'
 
+export interface ActionResponse {
+  ok: boolean
+  detail?: string
+  error?: string
+}
+
 export interface ChatChannel {
   id: number
   chat_key: string
