@@ -20,11 +20,23 @@ export interface ChatChannelDetail extends ChatChannel {
 }
 
 export interface ChatMessageSegment {
-  type: string        // "text" | "image" | "file" | "voice" | "video" | "at" | "reference" | "json_card"
+  type: string        // "text" | "image" | "file" | "voice" | "video" | "at" | "json_card"
   text: string
+  // file / image / voice / video
   file_name?: string
   local_path?: string
   remote_url?: string
+  // at
+  target_platform_userid?: string
+  target_nickname?: string
+  // json_card
+  json_data?: Record<string, unknown>
+  card_title?: string
+  card_desc?: string
+  card_icon?: string
+  card_preview?: string
+  card_url?: string
+  share_from_nick?: string
 }
 
 export interface ChatMessage {
@@ -49,9 +61,14 @@ export interface ChatMessageListResponse {
   items: ChatMessage[]
 }
 
-export interface ActionResponse {
-  ok: boolean
-  error?: string
+export interface ChatChannelUser {
+  platform_userid: string
+  nickname: string
+}
+
+export interface ChatChannelUsersResponse {
+  total: number
+  items: ChatChannelUser[]
 }
 
 export const chatChannelApi = {
@@ -117,6 +134,11 @@ export const chatChannelApi = {
     const response = await axios.post<ActionResponse>(`/chat-channel/${chatKey}/send`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     })
+    return response.data
+  },
+
+  getUsers: async (chatKey: string): Promise<ChatChannelUsersResponse> => {
+    const response = await axios.get<ChatChannelUsersResponse>(`/chat-channel/${chatKey}/users`)
     return response.data
   },
 } 

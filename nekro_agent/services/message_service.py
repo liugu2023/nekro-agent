@@ -284,12 +284,57 @@ class MessageService:
                             },
                         )
             elif msg.type == AgentMessageSegmentType.TEXT:
-                content_data.append(
-                    {
-                        "type": "text",
-                        "text": msg.content,
-                    },
-                )
+                # 处理 AI 生成的 @提及 [@id:qq_id@]
+                text = msg.content
+                ai_marker_pattern = r'\[@id:(\d+)@\]'
+                matches = list(re.finditer(ai_marker_pattern, text))
+
+                if matches:
+                    # 有 AI 标记，需要解析并替换
+                    last_end = 0
+                    for match in matches:
+                        # 添加标记前的文本
+                        if match.start() > last_end:
+                            text_before = text[last_end:match.start()]
+                            if text_before.strip():
+                                content_data.append({
+                                    "type": "text",
+                                    "text": text_before,
+                                })
+
+                        # 从用户管理里查询昵称
+                        qq_id = match.group(1)
+                        user = await DBUser.get_by_union_id(
+                            adapter_key=db_chat_channel.adapter_key,
+                            platform_userid=qq_id,
+                        )
+
+                        nickname = user.username if user else f"User_{qq_id}"
+                        content_data.append({
+                            "type": "at",
+                            "text": f"@{nickname}",
+                            "target_platform_userid": qq_id,
+                            "target_nickname": nickname,
+                        })
+
+                        last_end = match.end()
+
+                    # 添加最后的文本
+                    if last_end < len(text):
+                        text_after = text[last_end:]
+                        if text_after.strip():
+                            content_data.append({
+                                "type": "text",
+                                "text": text_after,
+                            })
+                else:
+                    # 没有 AI 标记，直接添加
+                    content_data.append(
+                        {
+                            "type": "text",
+                            "text": text,
+                        },
+                    )
 
         adapter = adapter_utils.get_adapter(db_chat_channel.adapter_key)
         await DBChatMessage.create(

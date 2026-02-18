@@ -12,6 +12,15 @@ import {
   Snackbar,
   Alert,
   Tooltip,
+  Chip,
+  Card,
+  CardMedia,
+  CardContent,
+  Popover,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemText,
 } from '@mui/material'
 import SendIcon from '@mui/icons-material/Send'
 import AttachFileIcon from '@mui/icons-material/AttachFile'
@@ -192,6 +201,147 @@ function FileCard({
   )
 }
 
+/** @提及 Chip 组件 */
+function AtMention({ segment, isDark }: { segment: ChatMessageSegment; isDark: boolean }) {
+  const theme = useTheme()
+  return (
+    <Chip
+      label={`@${segment.target_nickname || 'User'}`}
+      size="small"
+      variant="outlined"
+      sx={{
+        fontWeight: 600,
+        fontSize: '12px',
+        height: 24,
+        my: 0.3,
+        bgcolor: isDark ? 'rgba(33, 150, 243, 0.15)' : 'rgba(33, 150, 243, 0.1)',
+        borderColor: theme.palette.primary.main,
+        color: theme.palette.primary.main,
+        cursor: 'default',
+      }}
+    />
+  )
+}
+
+/** JSON 卡片组件 */
+function JsonCardComponent({
+  segment,
+  isDark,
+}: {
+  segment: ChatMessageSegment
+  isDark: boolean
+}) {
+  const theme = useTheme()
+  const cardTitle = segment.card_title || segment.text || '卡片'
+  const cardDesc = segment.card_desc || ''
+  const cardIcon = segment.card_icon || ''
+  const cardPreview = segment.card_preview || ''
+  const cardUrl = segment.card_url || ''
+
+  return (
+    <Card
+      sx={{
+        my: 0.5,
+        maxWidth: 320,
+        overflow: 'hidden',
+        bgcolor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+        border: `1px solid ${isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'}`,
+        transition: 'all 0.2s',
+        cursor: cardUrl ? 'pointer' : 'default',
+        '&:hover': cardUrl
+          ? {
+              bgcolor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.04)',
+              boxShadow: theme.shadows[4],
+            }
+          : {},
+      }}
+      onClick={() => {
+        if (cardUrl) window.open(cardUrl, '_blank')
+      }}
+    >
+      {/* 卡片预览图 */}
+      {cardPreview && (
+        <CardMedia
+          component="img"
+          height={140}
+          image={cardPreview}
+          alt={cardTitle}
+          sx={{ objectFit: 'cover' }}
+        />
+      )}
+
+      {/* 卡片内容 */}
+      <CardContent sx={{ p: 1.2, '&:last-child': { pb: 1.2 } }}>
+        <Box sx={{ display: 'flex', gap: 0.8, alignItems: 'flex-start' }}>
+          {/* 卡片图标 */}
+          {cardIcon && (
+            <img
+              src={cardIcon}
+              alt="icon"
+              style={{
+                width: 32,
+                height: 32,
+                borderRadius: 4,
+                flexShrink: 0,
+              }}
+              onError={(e) => {
+                const target = e.target as HTMLImageElement
+                target.style.display = 'none'
+              }}
+            />
+          )}
+
+          {/* 卡片标题和描述 */}
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography
+              variant="body2"
+              sx={{
+                fontWeight: 600,
+                fontSize: '13px',
+                color: theme.palette.text.primary,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                mb: 0.3,
+              }}
+            >
+              {cardTitle}
+            </Typography>
+            {cardDesc && (
+              <Typography
+                variant="caption"
+                sx={{
+                  fontSize: '12px',
+                  color: theme.palette.text.secondary,
+                  display: '-webkit-box',
+                  WebkitBoxOrient: 'vertical',
+                  WebkitLineClamp: 2,
+                  overflow: 'hidden',
+                }}
+              >
+                {cardDesc}
+              </Typography>
+            )}
+            {segment.share_from_nick && (
+              <Typography
+                variant="caption"
+                sx={{
+                  fontSize: '11px',
+                  color: theme.palette.text.disabled,
+                  display: 'block',
+                  mt: 0.3,
+                }}
+              >
+                来自: {segment.share_from_nick}
+              </Typography>
+            )}
+          </Box>
+        </Box>
+      </CardContent>
+    </Card>
+  )
+}
+
 /** 渲染消息内容（支持图文混排） */
 function MessageContent({
   message,
@@ -268,7 +418,28 @@ function MessageContent({
           )
         }
 
-        // text / at / 其他：渲染文本
+        if (seg.type === 'at') {
+          return (
+            <Box key={i} sx={{ display: 'inline-block', mr: 0.5 }}>
+              <AtMention
+                segment={seg}
+                isDark={theme.palette.mode === 'dark'}
+              />
+            </Box>
+          )
+        }
+
+        if (seg.type === 'json_card') {
+          return (
+            <JsonCardComponent
+              key={i}
+              segment={seg}
+              isDark={theme.palette.mode === 'dark'}
+            />
+          )
+        }
+
+        // text：渲染文本
         if (seg.text) {
           return (
             <Typography
@@ -348,6 +519,22 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
     message: '',
     severity: 'success',
   })
+
+  // @ 用户选择
+  const [atAnchorEl, setAtAnchorEl] = useState<HTMLElement | null>(null)
+  const [atUsers, setAtUsers] = useState<Array<{ platform_userid: string; nickname: string }>>([])
+  const [atQuery, setAtQuery] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const atDebounceTimerRef = useRef<number | null>(null)
+
+  // 清理防抖计时器
+  useEffect(() => {
+    return () => {
+      if (atDebounceTimerRef.current) {
+        clearTimeout(atDebounceTimerRef.current)
+      }
+    }
+  }, [])
 
   const isDark = theme.palette.mode === 'dark'
 
@@ -481,6 +668,61 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
     },
     [handleSend]
   )
+
+  // 处理输入框变化（检测@符号，防抖匹配）
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const value = e.target.value
+      setInputValue(value)
+
+      // 清除之前的防抖计时器
+      if (atDebounceTimerRef.current) {
+        clearTimeout(atDebounceTimerRef.current)
+      }
+
+      // 检测@符号
+      const atIndex = value.lastIndexOf('@')
+      if (atIndex >= 0) {
+        const afterAt = value.slice(atIndex + 1)
+        // 只显示输入中的@（没有空格）
+        if (!afterAt.includes(' ') && !afterAt.includes('\n')) {
+          setAtQuery(afterAt)
+
+          // 防抖：延迟 500ms 后执行匹配
+          atDebounceTimerRef.current = window.setTimeout(async () => {
+            if (atIndex === 0 || value[atIndex - 1] === ' ' || value[atIndex - 1] === '\n') {
+              try {
+                const res = await chatChannelApi.getUsers(chatKey)
+                setAtUsers(res.items)
+                // 定位弹窗到输入框
+                if (inputRef.current) {
+                  setAtAnchorEl(inputRef.current)
+                }
+              } catch (err) {
+                console.error('Failed to fetch users:', err)
+              }
+            }
+          }, 500)
+        }
+      } else {
+        setAtAnchorEl(null)
+        setAtQuery('')
+      }
+    },
+    [chatKey]
+  )
+
+  // 选择用户
+  const handleSelectUser = (userid: string, nickname: string) => {
+    const atIndex = inputValue.lastIndexOf('@')
+    const before = inputValue.slice(0, atIndex)
+    const newValue = `${before}[@id:${userid}@] `
+    setInputValue(newValue)
+    setAtAnchorEl(null)
+    setAtQuery('')
+    // 焦点返回输入框
+    setTimeout(() => inputRef.current?.focus(), 0)
+  }
 
   if (isLoading) {
     return (
@@ -782,13 +1024,14 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
           <AttachFileIcon fontSize="small" />
         </IconButton>
         <TextField
+          ref={inputRef}
           fullWidth
           size="small"
           multiline
           maxRows={3}
           placeholder={t('messageHistory.inputPlaceholder')}
           value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
+          onChange={handleInputChange}
           onKeyDown={handleKeyDown}
           disabled={sending}
           sx={{
@@ -798,6 +1041,78 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
             },
           }}
         />
+
+        {/* 输入框渲染预览 - 显示 @mention 和文本 */}
+        {inputValue && (
+          <Box
+            sx={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: 0.5,
+              px: 1.5,
+              py: 0.5,
+              fontSize: '13.5px',
+              lineHeight: 1.6,
+              color: theme.palette.text.primary,
+              maxWidth: '100%',
+              minHeight: 24,
+            }}
+          >
+            {(() => {
+              const parts: Array<{ type: 'text' | 'mention'; content: string; id?: string; nickname?: string }> = []
+              const mentionPattern = /\[@id:(\d+)@\]/g
+              let lastIndex = 0
+              let match
+
+              while ((match = mentionPattern.exec(inputValue)) !== null) {
+                if (match.index > lastIndex) {
+                  parts.push({
+                    type: 'text',
+                    content: inputValue.slice(lastIndex, match.index),
+                  })
+                }
+                const userId = match[1]
+                const user = atUsers.find(u => u.platform_userid === userId)
+                parts.push({
+                  type: 'mention',
+                  content: match[0],
+                  id: userId,
+                  nickname: user?.nickname || `User_${userId}`,
+                })
+                lastIndex = mentionPattern.lastIndex
+              }
+
+              if (lastIndex < inputValue.length) {
+                parts.push({
+                  type: 'text',
+                  content: inputValue.slice(lastIndex),
+                })
+              }
+
+              return parts.length > 0 ? parts : [{ type: 'text', content: inputValue }]
+            })().map((part, idx) =>
+              part.type === 'text' ? (
+                <span key={idx}>{part.content}</span>
+              ) : (
+                <Chip
+                  key={idx}
+                  label={`@${part.nickname}`}
+                  size="small"
+                  variant="outlined"
+                  sx={{
+                    fontWeight: 600,
+                    fontSize: '11px',
+                    height: 22,
+                    bgcolor: isDark ? 'rgba(33, 150, 243, 0.15)' : 'rgba(33, 150, 243, 0.1)',
+                    borderColor: theme.palette.primary.main,
+                    color: theme.palette.primary.main,
+                  }}
+                />
+              )
+            )}
+          </Box>
+        )}
         <IconButton
           color="primary"
           onClick={handleSend}
@@ -811,6 +1126,71 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
         </IconButton>
       </Box>
       )}
+
+      {/* @ 用户列表弹窗 */}
+      <Popover
+        open={Boolean(atAnchorEl)}
+        anchorEl={atAnchorEl}
+        onClose={() => setAtAnchorEl(null)}
+        anchorOrigin={{ vertical: 'top', horizontal: 'left' }}
+        transformOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+        PaperProps={{
+          sx: {
+            maxHeight: 300,
+            width: 280,
+            borderRadius: 1,
+          },
+        }}
+      >
+        <List sx={{ py: 0 }}>
+          {atUsers
+            .filter(u => u.nickname.startsWith(atQuery) || u.platform_userid.startsWith(atQuery))
+            .map(user => (
+              <ListItemButton
+                key={user.platform_userid}
+                onClick={() => handleSelectUser(user.platform_userid, user.nickname)}
+                sx={{
+                  py: 1,
+                  px: 1.5,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1,
+                  '&:hover': {
+                    bgcolor: theme.palette.action.hover,
+                  },
+                }}
+              >
+                <Avatar
+                  src={getAvatarUrl(user.platform_userid)}
+                  sx={{
+                    width: 32,
+                    height: 32,
+                    flexShrink: 0,
+                    fontSize: '12px',
+                    bgcolor: nameToColor(user.nickname),
+                  }}
+                >
+                  {user.nickname?.[0] ?? '?'}
+                </Avatar>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography variant="body2" sx={{ fontSize: '13px', fontWeight: 500 }}>
+                    {user.nickname}
+                  </Typography>
+                  <Typography variant="caption" sx={{ fontSize: '11px', color: theme.palette.text.disabled }}>
+                    {user.platform_userid}
+                  </Typography>
+                </Box>
+              </ListItemButton>
+            ))}
+          {atUsers.filter(u => u.nickname.startsWith(atQuery) || u.platform_userid.startsWith(atQuery)).length === 0 && (
+            <ListItem>
+              <Typography variant="caption" sx={{ width: '100%', textAlign: 'center', py: 1 }}>
+                没有找到用户
+              </Typography>
+            </ListItem>
+          )}
+        </List>
+      </Popover>
 
       {/* 提示 */}
       <Snackbar
