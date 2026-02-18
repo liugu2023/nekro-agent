@@ -144,4 +144,7 @@ async def get_upload_file(
     media_type = media_map.get(suffix, "application/octet-stream")
 
     headers = {"Cache-Control": "public, max-age=86400", "ETag": f'"{safe_filename}"'}
+    # 非已知媒体类型强制下载，防止浏览器执行未知内容
+    if media_type == "application/octet-stream":
+        headers["Content-Disposition"] = f'attachment; filename="{safe_filename}"'
     return FileResponse(filepath, headers=headers, media_type=media_type)

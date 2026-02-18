@@ -526,6 +526,7 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
   const [atQuery, setAtQuery] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
   const atDebounceTimerRef = useRef<number | null>(null)
+  const isComposingRef = useRef(false)
 
   // 清理防抖计时器
   useEffect(() => {
@@ -658,10 +659,10 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
     }
   }, [inputValue, attachedFile, sending, chatKey, queryClient, t])
 
-  // 回车发送
+  // 回车发送（IME 输入法确认时不触发）
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !isComposingRef.current) {
         e.preventDefault()
         handleSend()
       }
@@ -669,11 +670,14 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
     [handleSend]
   )
 
-  // 处理输入框变化（检测@符号，防抖匹配）
+  // 处理输入框变化（检测@符号，防抖匹配；IME 组合中跳过检测）
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const value = e.target.value
       setInputValue(value)
+
+      // IME 组合中不做 @mention 检测
+      if (isComposingRef.current) return
 
       // 清除之前的防抖计时器
       if (atDebounceTimerRef.current) {
@@ -993,6 +997,7 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
 
       {/* 输入框 */}
       {canSend && (
+      <>
       <Box
         sx={{
           display: 'flex',
@@ -1033,6 +1038,12 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
           value={inputValue}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
+          onCompositionStart={() => { isComposingRef.current = true }}
+          onCompositionEnd={(e) => {
+            isComposingRef.current = false
+            // 组合结束后，用最终值重新触发一次 @mention 检测
+            handleInputChange(e as unknown as React.ChangeEvent<HTMLInputElement>)
+          }}
           disabled={sending}
           sx={{
             '& .MuiOutlinedInput-root': {
@@ -1041,78 +1052,6 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
             },
           }}
         />
-
-        {/* 输入框渲染预览 - 显示 @mention 和文本 */}
-        {inputValue && (
-          <Box
-            sx={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              alignItems: 'center',
-              gap: 0.5,
-              px: 1.5,
-              py: 0.5,
-              fontSize: '13.5px',
-              lineHeight: 1.6,
-              color: theme.palette.text.primary,
-              maxWidth: '100%',
-              minHeight: 24,
-            }}
-          >
-            {(() => {
-              const parts: Array<{ type: 'text' | 'mention'; content: string; id?: string; nickname?: string }> = []
-              const mentionPattern = /\[@id:(\d+)@\]/g
-              let lastIndex = 0
-              let match
-
-              while ((match = mentionPattern.exec(inputValue)) !== null) {
-                if (match.index > lastIndex) {
-                  parts.push({
-                    type: 'text',
-                    content: inputValue.slice(lastIndex, match.index),
-                  })
-                }
-                const userId = match[1]
-                const user = atUsers.find(u => u.platform_userid === userId)
-                parts.push({
-                  type: 'mention',
-                  content: match[0],
-                  id: userId,
-                  nickname: user?.nickname || `User_${userId}`,
-                })
-                lastIndex = mentionPattern.lastIndex
-              }
-
-              if (lastIndex < inputValue.length) {
-                parts.push({
-                  type: 'text',
-                  content: inputValue.slice(lastIndex),
-                })
-              }
-
-              return parts.length > 0 ? parts : [{ type: 'text', content: inputValue }]
-            })().map((part, idx) =>
-              part.type === 'text' ? (
-                <span key={idx}>{part.content}</span>
-              ) : (
-                <Chip
-                  key={idx}
-                  label={`@${part.nickname}`}
-                  size="small"
-                  variant="outlined"
-                  sx={{
-                    fontWeight: 600,
-                    fontSize: '11px',
-                    height: 22,
-                    bgcolor: isDark ? 'rgba(33, 150, 243, 0.15)' : 'rgba(33, 150, 243, 0.1)',
-                    borderColor: theme.palette.primary.main,
-                    color: theme.palette.primary.main,
-                  }}
-                />
-              )
-            )}
-          </Box>
-        )}
         <IconButton
           color="primary"
           onClick={handleSend}
@@ -1125,6 +1064,77 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
           {sending ? <CircularProgress size={20} /> : <SendIcon fontSize="small" />}
         </IconButton>
       </Box>
+
+      {/* 输入框渲染预览 - 仅在包含 @mention 标记时显示 */}
+      <Box
+        sx={{
+          display: inputValue && /\[@id:\d+@\]/.test(inputValue) ? 'flex' : 'none',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 0.5,
+          px: 2,
+          py: 0.5,
+          fontSize: '12px',
+          lineHeight: 1.6,
+          color: theme.palette.text.secondary,
+          borderTop: `1px solid ${theme.palette.divider}`,
+        }}
+      >
+          {(() => {
+            const parts: Array<{ type: 'text' | 'mention'; content: string; id?: string; nickname?: string }> = []
+            const mentionPattern = /\[@id:(\d+)@\]/g
+            let lastIndex = 0
+            let match
+
+            while ((match = mentionPattern.exec(inputValue)) !== null) {
+              if (match.index > lastIndex) {
+                parts.push({
+                  type: 'text',
+                  content: inputValue.slice(lastIndex, match.index),
+                })
+              }
+              const userId = match[1]
+              const user = atUsers.find(u => u.platform_userid === userId)
+              parts.push({
+                type: 'mention',
+                content: match[0],
+                id: userId,
+                nickname: user?.nickname || `User_${userId}`,
+              })
+              lastIndex = mentionPattern.lastIndex
+            }
+
+            if (lastIndex < inputValue.length) {
+              parts.push({
+                type: 'text',
+                content: inputValue.slice(lastIndex),
+              })
+            }
+
+            return parts
+          })().map((part, idx) =>
+            part.type === 'text' ? (
+              <span key={idx}>{part.content}</span>
+            ) : (
+              <Chip
+                key={idx}
+                label={`@${part.nickname}`}
+                size="small"
+                variant="outlined"
+                sx={{
+                  fontWeight: 600,
+                  fontSize: '11px',
+                  height: 22,
+                  bgcolor: isDark ? 'rgba(33, 150, 243, 0.15)' : 'rgba(33, 150, 243, 0.1)',
+                  borderColor: theme.palette.primary.main,
+                  color: theme.palette.primary.main,
+                }}
+              />
+            )
+          )}
+        </Box>
+
+      </>
       )}
 
       {/* @ 用户列表弹窗 */}
