@@ -99,6 +99,11 @@
     "sendFailed": "Failed to send",
     "quotedMessage": "Quoted message",
     "pokeSent": "Poked!",
-    "pokeFailed": "Poke failed"
+    "pokeFailed": "Poke failed",
+    "senderType": "Sender",
+    "senderBot": "Bot",
+    "senderSystem": "SYSTEM",
+    "senderNone": "Silent",
+    "senderNoneHint": "Sent as bot with command output prefix. Won't enter context or be displayed in chat."
   }
 }

@@ -389,14 +389,40 @@ async def send_message_to_channel(
     chat_key: str,
     message: str = Form(default=""),
     file: Optional[UploadFile] = File(default=None),
+    sender_type: str = Form(default="bot"),
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> SendMessageResponse:
-    """从 WebUI 向聊天频道发送消息（支持文本和/或文件）"""
+    """从 WebUI 向聊天频道发送消息（支持文本和/或文件）
+
+    sender_type:
+        - bot: 以机器人身份发送（默认）
+        - system: 以 SYSTEM 身份发送，类似节日祝福触发
+        - none: 消息带 ≡NA≡ 前缀，不进入上下文
+    """
     channel = await DBChatChannel.get_or_none(chat_key=chat_key)
     if not channel:
         raise NotFoundError(resource="聊天频道")
 
-    # 检测适配器是否支持 WebUI 发送
+    # system 类型不需要适配器转发，直接写入数据库
+    if sender_type == "system":
+        text = message.strip()
+        if not text:
+            return SendMessageResponse(ok=False, error="SYSTEM 消息内容不能为空")
+        try:
+            from nekro_agent.services.message_service import message_service
+
+            await message_service.push_system_message(
+                chat_key=chat_key,
+                agent_messages=text,
+                trigger_agent=True,
+                db_chat_channel=channel,
+            )
+            return SendMessageResponse(ok=True)
+        except Exception as e:
+            logger.error(f"WebUI 发送 SYSTEM 消息到 {chat_key} 失败: {e}")
+            return SendMessageResponse(ok=False, error=str(e))
+
+    # bot / none 类型需要适配器转发
     try:
         adapter = get_adapter(channel.adapter_key)
         if not adapter.supports_webui_send:
@@ -405,6 +431,13 @@ async def send_message_to_channel(
         return SendMessageResponse(ok=False, error="适配器未加载")
 
     text = message.strip()
+
+    # none 类型：添加命令输出前缀，确保不进入上下文
+    if sender_type == "none" and text:
+        from nekro_agent.core.config import config as app_config
+
+        text = f"{app_config.AI_COMMAND_OUTPUT_PREFIX}{text}"
+
     if not text and not file:
         return SendMessageResponse(ok=False, error="消息内容不能为空")
 
@@ -448,7 +481,7 @@ async def send_message_to_channel(
             chat_key=chat_key,
             messages=segments,
             adapter=adapter,
-            record=True,
+            record=sender_type != "none",
             file_mode=is_file_mode,
         )
         return SendMessageResponse(ok=True)

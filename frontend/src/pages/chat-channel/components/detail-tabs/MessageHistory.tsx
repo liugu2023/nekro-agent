@@ -22,6 +22,8 @@ import {
   ListItemButton,
   ListItemText,
   Collapse,
+  ToggleButtonGroup,
+  ToggleButton,
 } from '@mui/material'
 import SendIcon from '@mui/icons-material/Send'
 import AttachFileIcon from '@mui/icons-material/AttachFile'
@@ -696,6 +698,7 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
   // 发送消息状态
   const [inputValue, setInputValue] = useState('')
   const [sending, setSending] = useState(false)
+  const [senderType, setSenderType] = useState<'bot' | 'system' | 'none'>('bot')
   const [attachedFile, setAttachedFile] = useState<File | null>(null)
   const [filePreviewUrl, setFilePreviewUrl] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -824,7 +827,7 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
     if (sending) return
     setSending(true)
     try {
-      const res = await chatChannelApi.sendMessage(chatKey, msg, attachedFile || undefined)
+      const res = await chatChannelApi.sendMessage(chatKey, msg, attachedFile || undefined, senderType)
       if (res.ok) {
         setInputValue('')
         setAttachedFile(null)
@@ -842,7 +845,7 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
     } finally {
       setSending(false)
     }
-  }, [inputValue, attachedFile, sending, chatKey, queryClient, t])
+  }, [inputValue, attachedFile, sending, chatKey, senderType, queryClient, t])
 
   // 戳一戳
   const handlePoke = useCallback(async (targetUserId: string) => {
@@ -1355,6 +1358,47 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
       {/* 输入框 */}
       {canSend && (
       <>
+      {/* 发送身份选择 */}
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          px: 1.5,
+          pt: 0.75,
+          pb: 0,
+          borderTop: attachedFile ? 'none' : `1px solid ${theme.palette.divider}`,
+          bgcolor: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.02)',
+        }}
+      >
+        <Typography variant="caption" sx={{ color: theme.palette.text.secondary, whiteSpace: 'nowrap' }}>
+          {t('messageHistory.senderType')}
+        </Typography>
+        <ToggleButtonGroup
+          value={senderType}
+          exclusive
+          size="small"
+          onChange={(_, val) => { if (val) setSenderType(val) }}
+          sx={{
+            '& .MuiToggleButton-root': {
+              py: 0,
+              px: 1,
+              fontSize: '12px',
+              textTransform: 'none',
+              lineHeight: '24px',
+            },
+          }}
+        >
+          <ToggleButton value="bot">{t('messageHistory.senderBot')}</ToggleButton>
+          <ToggleButton value="system">{t('messageHistory.senderSystem')}</ToggleButton>
+          <ToggleButton value="none">{t('messageHistory.senderNone')}</ToggleButton>
+        </ToggleButtonGroup>
+        {senderType === 'none' && (
+          <Typography variant="caption" sx={{ color: theme.palette.warning.main, fontSize: '11px' }}>
+            {t('messageHistory.senderNoneHint')}
+          </Typography>
+        )}
+      </Box>
       <Box
         sx={{
           display: 'flex',
@@ -1362,7 +1406,6 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
           gap: 0.5,
           px: 1.5,
           py: 1,
-          borderTop: attachedFile ? 'none' : `1px solid ${theme.palette.divider}`,
           bgcolor: isDark ? 'rgba(0,0,0,0.2)' : 'rgba(0,0,0,0.02)',
         }}
       >
