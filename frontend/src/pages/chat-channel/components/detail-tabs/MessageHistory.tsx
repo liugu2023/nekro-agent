@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Box,
   Typography,
@@ -25,6 +25,7 @@ import {
 import SendIcon from '@mui/icons-material/Send'
 import AttachFileIcon from '@mui/icons-material/AttachFile'
 import CloseIcon from '@mui/icons-material/Close'
+import ReplyIcon from '@mui/icons-material/Reply'
 import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf'
 import DescriptionIcon from '@mui/icons-material/Description'
 import AudioFileIcon from '@mui/icons-material/AudioFile'
@@ -50,6 +51,7 @@ function debounce<T extends (...args: unknown[]) => unknown>(
 interface MessageHistoryProps {
   chatKey: string
   canSend?: boolean
+  aiAlwaysIncludeMsgId?: boolean
 }
 
 interface MessageResponse {
@@ -496,7 +498,7 @@ function MessageContent({
   )
 }
 
-export default function MessageHistory({ chatKey, canSend = false }: MessageHistoryProps) {
+export default function MessageHistory({ chatKey, canSend = false, aiAlwaysIncludeMsgId = false }: MessageHistoryProps) {
   const { t } = useTranslation('chat-channel')
   const theme = useTheme()
   const queryClient = useQueryClient()
@@ -728,6 +730,40 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
+  // 按时间正序排列消息，过滤掉 SYSTEM 内部消息（agent 方法返回等）
+  const allMessages =
+    data?.pages
+      .flatMap(page => page.items)
+      .filter(msg => msg.sender_name !== 'SYSTEM')
+      .sort((a, b) => new Date(a.create_time).getTime() - new Date(b.create_time).getTime()) || []
+
+  // 构建 message_id -> ChatMessage 的映射，用于引用消息查找
+  const messageByMsgId = useMemo(() => {
+    const map = new Map<string, ChatMessage>()
+    for (const msg of allMessages) {
+      if (msg.message_id) {
+        map.set(msg.message_id, msg)
+      }
+    }
+    return map
+  }, [allMessages])
+
+  // 滚动到被引用的消息
+  const scrollToMessage = useCallback((msgId: string) => {
+    const container = containerRef.current
+    if (!container) return
+    const el = container.querySelector(`[data-message-id="${msgId}"]`) as HTMLElement | null
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      // 短暂高亮
+      el.style.transition = 'background 0.3s'
+      el.style.background = isDark ? 'rgba(56, 139, 253, 0.2)' : 'rgba(56, 139, 253, 0.12)'
+      setTimeout(() => {
+        el.style.background = ''
+      }, 1500)
+    }
+  }, [isDark])
+
   if (isLoading) {
     return (
       <Box className="h-full flex items-center justify-center">
@@ -735,13 +771,6 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
       </Box>
     )
   }
-
-  // 按时间正序排列消息，过滤掉 SYSTEM 内部消息（agent 方法返回等）
-  const allMessages =
-    data?.pages
-      .flatMap(page => page.items)
-      .filter(msg => msg.sender_name !== 'SYSTEM')
-      .sort((a, b) => new Date(a.create_time).getTime() - new Date(b.create_time).getTime()) || []
 
   return (
     <Box className="h-full flex flex-col overflow-hidden relative">
@@ -782,7 +811,7 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
                 prevMsg.sender_id === message.sender_id
 
               return (
-                <Box key={message.id}>
+                <Box key={message.id} data-message-id={message.message_id || undefined}>
                   {/* 时间分隔线 */}
                   {showDivider && (
                     <Box
@@ -808,6 +837,78 @@ export default function MessageHistory({ chatKey, canSend = false }: MessageHist
                       </Typography>
                     </Box>
                   )}
+
+                  {/* 引用消息预览 */}
+                  {aiAlwaysIncludeMsgId && message.ref_msg_id && (() => {
+                    const refMsg = messageByMsgId.get(message.ref_msg_id)
+                    return (
+                      <Box
+                        sx={{
+                          display: 'flex',
+                          flexDirection: isBot ? 'row-reverse' : 'row',
+                          px: 1,
+                          mt: 0.5,
+                          mb: -0.3,
+                        }}
+                      >
+                        {/* 头像占位对齐 */}
+                        <Box sx={{ width: 36, flexShrink: 0 }} />
+                        <Box
+                          onClick={() => refMsg ? scrollToMessage(message.ref_msg_id!) : undefined}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 0.5,
+                            maxWidth: '70%',
+                            ml: isBot ? 0 : 1,
+                            mr: isBot ? 1 : 0,
+                            pl: 1,
+                            pr: 1.5,
+                            py: 0.3,
+                            borderLeft: `2.5px solid ${theme.palette.primary.main}`,
+                            borderRadius: '0 6px 6px 0',
+                            bgcolor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
+                            cursor: refMsg ? 'pointer' : 'default',
+                            transition: 'background 0.15s',
+                            '&:hover': refMsg ? {
+                              bgcolor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)',
+                            } : {},
+                          }}
+                        >
+                          <ReplyIcon sx={{ fontSize: 14, color: theme.palette.text.disabled, transform: 'scaleX(-1)' }} />
+                          {refMsg ? (
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                fontSize: '11.5px',
+                                color: theme.palette.text.secondary,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                lineHeight: 1.4,
+                              }}
+                            >
+                              <Box component="span" sx={{ fontWeight: 600, color: theme.palette.text.primary, mr: 0.5 }}>
+                                {refMsg.sender_nickname || refMsg.sender_name}
+                              </Box>
+                              {refMsg.content || '...'}
+                            </Typography>
+                          ) : (
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                fontSize: '11.5px',
+                                color: theme.palette.text.disabled,
+                                fontStyle: 'italic',
+                              }}
+                            >
+                              {t('messageHistory.quotedMessage')}
+                            </Typography>
+                          )}
+                        </Box>
+                      </Box>
+                    )
+                  })()}
 
                   {/* 气泡布局 */}
                   <Box

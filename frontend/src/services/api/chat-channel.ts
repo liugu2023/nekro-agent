@@ -23,6 +23,7 @@ export interface ChatChannelDetail extends ChatChannel {
   conversation_start_time: string
   preset_id?: number | null
   can_send?: boolean
+  ai_always_include_msg_id?: boolean
 }
 
 export interface ChatMessageSegment {
@@ -55,6 +56,8 @@ export interface ChatMessage {
   content_data: ChatMessageSegment[]
   chat_key: string
   create_time: string
+  message_id?: string
+  ref_msg_id?: string
 }
 
 export interface ChatChannelListResponse {

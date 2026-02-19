@@ -96,6 +96,7 @@
     "inputPlaceholder": "Type a message...",
     "send": "Send",
     "sendSuccess": "Message sent",
-    "sendFailed": "Failed to send"
+    "sendFailed": "Failed to send",
+    "quotedMessage": "Quoted message"
   }
 }
