@@ -6,10 +6,10 @@ from pydantic import BaseModel
 from tortoise.expressions import Q
 
 from nekro_agent.adapters import get_adapter
+from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_user import DBUser
-from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.schemas.errors import NotFoundError
 from nekro_agent.services.user.deps import get_current_active_user
 from nekro_agent.services.user.perm import Role, require_role
@@ -41,6 +41,7 @@ class ChatChannelDetail(ChatChannelItem):
     conversation_start_time: str
     preset_id: Optional[int]
     can_send: bool = False
+    ai_always_include_msg_id: bool = False
 
 
 class ChatMessage(BaseModel):
@@ -53,6 +54,8 @@ class ChatMessage(BaseModel):
     content_data: List[Dict[str, Any]]
     chat_key: str
     create_time: str
+    message_id: str = ""
+    ref_msg_id: str = ""
 
 
 class ChatMessageListResponse(BaseModel):
@@ -138,9 +141,7 @@ async def get_chat_channel_list(
                 create_time=channel.create_time.strftime("%Y-%m-%d %H:%M:%S"),
                 update_time=channel.update_time.strftime("%Y-%m-%d %H:%M:%S"),
                 last_message_time=(
-                    info["last_message_time"].strftime("%Y-%m-%d %H:%M:%S")
-                    if info["last_message_time"] is not None
-                    else None
+                    info["last_message_time"].strftime("%Y-%m-%d %H:%M:%S") if info["last_message_time"] is not None else None
                 ),
             ),
         )
@@ -172,6 +173,15 @@ async def get_chat_channel_detail(chat_key: str, _current_user: DBUser = Depends
     except Exception:
         pass
 
+    # 获取频道有效配置
+    ai_always_include_msg_id = False
+    try:
+        from nekro_agent.services.config_resolver import config_resolver
+        effective_config = await config_resolver.get_effective_config(chat_key)
+        ai_always_include_msg_id = effective_config.AI_ALWAYS_INCLUDE_MSG_ID
+    except Exception:
+        pass
+
     return ChatChannelDetail(
         id=channel.id,
         chat_key=channel.chat_key,
@@ -186,6 +196,7 @@ async def get_chat_channel_detail(chat_key: str, _current_user: DBUser = Depends
         conversation_start_time=channel.conversation_start_time.strftime("%Y-%m-%d %H:%M:%S"),
         preset_id=channel.preset_id,
         can_send=can_send,
+        ai_always_include_msg_id=ai_always_include_msg_id,
     )
 
 
@@ -246,23 +257,34 @@ async def get_chat_channel_messages(
         except Exception:
             return []
 
-    return ChatMessageListResponse(
-        total=total,
-        items=[
-            ChatMessage(
-                id=msg.id,
-                sender_id=str(msg.sender_id),
-                sender_name=msg.sender_name,
-                sender_nickname=msg.sender_nickname or msg.sender_name,
-                platform_userid=msg.platform_userid or "",
-                content=msg.content_text,
-                content_data=_parse_content_data(msg.content_data),
-                chat_key=msg.chat_key,
-                create_time=msg.create_time.strftime("%Y-%m-%d %H:%M:%S"),
+    def _safe_ref_msg_id(msg: DBChatMessage) -> str:
+        try:
+            return msg.ext_data_obj.ref_msg_id or ""
+        except Exception:
+            return ""
+
+    items: List[ChatMessage] = []
+    for msg in messages:
+        try:
+            items.append(
+                ChatMessage(
+                    id=msg.id,
+                    sender_id=str(msg.sender_id),
+                    sender_name=msg.sender_name,
+                    sender_nickname=msg.sender_nickname or msg.sender_name,
+                    platform_userid=msg.platform_userid or "",
+                    content=msg.content_text,
+                    content_data=_parse_content_data(msg.content_data),
+                    chat_key=msg.chat_key,
+                    create_time=msg.create_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    message_id=getattr(msg, "message_id", "") or "",
+                    ref_msg_id=_safe_ref_msg_id(msg),
+                )
             )
-            for msg in messages
-        ],
-    )
+        except Exception:
+            logger.warning(f"构建消息响应失败, msg_id={msg.id}, 跳过")
+
+    return ChatMessageListResponse(total=total, items=items)
 
 
 @router.post("/{chat_key}/preset", summary="设置聊天频道人设")
@@ -283,12 +305,14 @@ async def set_chat_channel_preset(
 
 class ChatChannelUser(BaseModel):
     """聊天频道用户"""
+
     platform_userid: str
     nickname: str
 
 
 class ChatChannelUsersResponse(BaseModel):
     """聊天频道用户列表"""
+
     total: int
     items: List[ChatChannelUser]
 
@@ -304,9 +328,7 @@ async def get_chat_channel_users(
         raise NotFoundError(resource="聊天频道")
 
     # 从消息表查询该频道的所有独特用户
-    messages = await DBChatMessage.filter(chat_key=chat_key).distinct().values_list(
-        'platform_userid', 'sender_nickname'
-    )
+    messages = await DBChatMessage.filter(chat_key=chat_key).distinct().values_list('platform_userid', 'sender_nickname')
 
     # 去重并排序
     users_dict: Dict[str, str] = {}
