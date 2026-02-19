@@ -134,11 +134,14 @@ export const chatChannelApi = {
     return response.data
   },
 
-  sendMessage: async (chatKey: string, message: string, file?: File): Promise<ActionResponse> => {
+  sendMessage: async (chatKey: string, message: string, file?: File, senderType?: 'bot' | 'system' | 'none'): Promise<ActionResponse> => {
     const formData = new FormData()
     formData.append('message', message)
     if (file) {
       formData.append('file', file)
+    }
+    if (senderType) {
+      formData.append('sender_type', senderType)
     }
     const response = await axios.post<ActionResponse>(`/chat-channel/${chatKey}/send`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
