@@ -97,6 +97,8 @@
     "send": "Send",
     "sendSuccess": "Message sent",
     "sendFailed": "Failed to send",
-    "quotedMessage": "Quoted message"
+    "quotedMessage": "Quoted message",
+    "pokeSent": "Poked!",
+    "pokeFailed": "Poke failed"
   }
 }

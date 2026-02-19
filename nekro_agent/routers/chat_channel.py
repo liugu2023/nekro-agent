@@ -346,6 +346,34 @@ async def get_chat_channel_users(
     return ChatChannelUsersResponse(total=len(items), items=items)
 
 
+class PokeRequest(BaseModel):
+    target_user_id: str
+
+
+@router.post("/{chat_key}/poke", summary="发送戳一戳")
+@require_role(Role.Admin)
+async def send_poke(
+    chat_key: str,
+    req: PokeRequest,
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> ActionResponse:
+    """双击头像触发戳一戳"""
+    channel = await DBChatChannel.get_or_none(chat_key=chat_key)
+    if not channel:
+        raise NotFoundError(resource="聊天频道")
+
+    try:
+        adapter = get_adapter(channel.adapter_key)
+    except KeyError:
+        return ActionResponse(ok=False)
+
+    if not hasattr(adapter, "send_poke"):
+        return ActionResponse(ok=False)
+
+    ok = await adapter.send_poke(chat_key, req.target_user_id)
+    return ActionResponse(ok=ok)
+
+
 class SendMessageRequest(BaseModel):
     message: str
 

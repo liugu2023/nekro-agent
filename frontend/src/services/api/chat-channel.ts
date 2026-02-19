@@ -27,7 +27,7 @@ export interface ChatChannelDetail extends ChatChannel {
 }
 
 export interface ChatMessageSegment {
-  type: 'text' | 'image' | 'file' | 'voice' | 'video' | 'at' | 'json_card'
+  type: 'text' | 'image' | 'file' | 'voice' | 'video' | 'at' | 'json_card' | 'poke'
   text: string
   // file / image / voice / video
   file_name?: string
@@ -46,6 +46,11 @@ export interface ChatMessageSegment {
   share_from_nick?: string
   // forward
   forward_content?: ForwardMessageItem[]
+  // poke
+  action_img_url?: string
+  poke_style?: string
+  poke_style_suffix?: string
+  target_id?: string
 }
 
 export interface ForwardMessageItem {
@@ -157,6 +162,13 @@ export const chatChannelApi = {
 
   getUsers: async (chatKey: string): Promise<ChatChannelUsersResponse> => {
     const response = await axios.get<ChatChannelUsersResponse>(`/chat-channel/${chatKey}/users`)
+    return response.data
+  },
+
+  sendPoke: async (chatKey: string, targetUserId: string): Promise<ActionResponse> => {
+    const response = await axios.post<ActionResponse>(`/chat-channel/${chatKey}/poke`, {
+      target_user_id: targetUserId,
+    })
     return response.data
   },
 } 

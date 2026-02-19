@@ -45,6 +45,14 @@ class BaseNoticeHandler:
         """
         raise NotImplementedError
 
+    def get_content_data(self, info: Dict[str, str]) -> list:
+        """获取富文本内容数据段
+
+        Returns:
+            list: 内容数据段列表，默认为空
+        """
+        return []
+
     def get_sender_platform_userid(self, info: Dict[str, str]) -> str:
         """获取发送者平台用户ID
 

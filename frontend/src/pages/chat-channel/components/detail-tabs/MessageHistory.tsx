@@ -591,6 +591,39 @@ function MessageContent({
           )
         }
 
+        if (seg.type === 'poke') {
+          return (
+            <Box
+              key={i}
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1,
+                py: 0.5,
+              }}
+            >
+              {seg.action_img_url && (
+                <img
+                  src={seg.action_img_url}
+                  alt="poke"
+                  style={{ width: 48, height: 48, objectFit: 'contain' }}
+                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                />
+              )}
+              <Typography
+                variant="body2"
+                sx={{
+                  fontSize: '13px',
+                  color: theme.palette.text.secondary,
+                  fontStyle: 'italic',
+                }}
+              >
+                {seg.text || message.content}
+              </Typography>
+            </Box>
+          )
+        }
+
         // text：渲染文本
         if (seg.text) {
           return (
@@ -811,6 +844,20 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
     }
   }, [inputValue, attachedFile, sending, chatKey, queryClient, t])
 
+  // 戳一戳
+  const handlePoke = useCallback(async (targetUserId: string) => {
+    try {
+      const res = await chatChannelApi.sendPoke(chatKey, targetUserId)
+      if (res.ok) {
+        setSnack({ open: true, message: t('messageHistory.pokeSent'), severity: 'success' })
+      } else {
+        setSnack({ open: true, message: t('messageHistory.pokeFailed'), severity: 'error' })
+      }
+    } catch {
+      setSnack({ open: true, message: t('messageHistory.pokeFailed'), severity: 'error' })
+    }
+  }, [chatKey, t])
+
   // 回车发送（IME 输入法确认时不触发）
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -960,6 +1007,59 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
                 !showDivider &&
                 prevMsg.sender_id === message.sender_id
 
+              // 戳一戳消息居中渲染
+              const pokeSegment = message.content_data?.find(seg => seg.type === 'poke')
+              if (pokeSegment) {
+                return (
+                  <Box key={message.id} data-message-id={message.message_id || undefined}>
+                    {showDivider && (
+                      <Box sx={{ display: 'flex', justifyContent: 'center', py: 1.5, my: 0.5 }}>
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            color: theme.palette.text.disabled,
+                            fontSize: '11px',
+                            background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                            px: 1.5, py: 0.3, borderRadius: '10px',
+                          }}
+                        >
+                          {message.create_time}
+                        </Typography>
+                      </Box>
+                    )}
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 1,
+                        py: 0.5,
+                        my: 0.3,
+                      }}
+                    >
+                      {pokeSegment.action_img_url && (
+                        <img
+                          src={pokeSegment.action_img_url}
+                          alt="poke"
+                          style={{ width: 40, height: 40, objectFit: 'contain' }}
+                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                        />
+                      )}
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          fontSize: '12px',
+                          color: theme.palette.text.disabled,
+                          fontStyle: 'italic',
+                        }}
+                      >
+                        {pokeSegment.text || message.content}
+                      </Typography>
+                    </Box>
+                  </Box>
+                )
+              }
+
               return (
                 <Box key={message.id} data-message-id={message.message_id || undefined}>
                   {/* 时间分隔线 */}
@@ -1078,6 +1178,7 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
                       ) : (
                         <Avatar
                           src={getAvatarUrl(message.platform_userid)}
+                          onDoubleClick={!isBot && message.platform_userid ? () => handlePoke(message.platform_userid) : undefined}
                           sx={{
                             width: 36,
                             height: 36,
@@ -1088,6 +1189,11 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
                               ? theme.palette.primary.main
                               : nameToColor(message.sender_name),
                             mt: 0.3,
+                            cursor: !isBot && message.platform_userid ? 'pointer' : 'default',
+                            transition: 'transform 0.15s',
+                            '&:active': !isBot && message.platform_userid ? {
+                              transform: 'scale(0.9)',
+                            } : {},
                           }}
                         >
                           {message.sender_name?.[0] ?? '?'}

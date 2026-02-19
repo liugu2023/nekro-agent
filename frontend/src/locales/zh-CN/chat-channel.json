@@ -97,6 +97,8 @@
     "send": "发送",
     "sendSuccess": "消息已发送",
     "sendFailed": "发送失败",
-    "quotedMessage": "引用消息"
+    "quotedMessage": "引用消息",
+    "pokeSent": "已戳一戳",
+    "pokeFailed": "戳一戳失败"
   }
 }
