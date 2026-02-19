@@ -27,6 +27,7 @@ class ChatMessageSegmentType(Enum):
     REFERENCE = "reference"
     AT = "at"
     JSON_CARD = "json_card"
+    FORWARD = "forward"
 
 
 class ChatMessageSegment(BaseModel):
@@ -150,6 +151,19 @@ class ChatMessageSegmentJsonCard(ChatMessageSegment):
         return ChatMessageSegmentType.JSON_CARD
 
 
+class ChatMessageSegmentForward(ChatMessageSegment):
+    """合并转发消息段
+
+    forward_content 结构:
+    [
+        {"sender": "昵称", "content": "文本内容(图片位置用[图片]占位)", "images": ["filename1.jpg"]},
+        ...
+    ]
+    """
+
+    forward_content: List[Dict[str, Any]] = []
+
+
 def segment_from_dict(data: Dict) -> ChatMessageSegment:
     """根据字典数据创建聊天消息段"""
     segment_type = ChatMessageSegmentType(data["type"])
@@ -163,6 +177,8 @@ def segment_from_dict(data: Dict) -> ChatMessageSegment:
         return ChatMessageSegmentAt.model_validate(data)
     if segment_type == ChatMessageSegmentType.JSON_CARD:
         return ChatMessageSegmentJsonCard.model_validate(data)
+    if segment_type == ChatMessageSegmentType.FORWARD:
+        return ChatMessageSegmentForward.model_validate(data)
     raise ValueError(f"Unsupported segment type: {segment_type}")
 
 

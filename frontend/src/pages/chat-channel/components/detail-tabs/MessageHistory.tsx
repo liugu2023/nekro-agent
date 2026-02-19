@@ -21,11 +21,13 @@ import {
   ListItem,
   ListItemButton,
   ListItemText,
+  Collapse,
 } from '@mui/material'
 import SendIcon from '@mui/icons-material/Send'
 import AttachFileIcon from '@mui/icons-material/AttachFile'
 import CloseIcon from '@mui/icons-material/Close'
 import ReplyIcon from '@mui/icons-material/Reply'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import PictureAsPdfIcon from '@mui/icons-material/PictureAsPdf'
 import DescriptionIcon from '@mui/icons-material/Description'
 import AudioFileIcon from '@mui/icons-material/AudioFile'
@@ -33,7 +35,7 @@ import VideoFileIcon from '@mui/icons-material/VideoFile'
 import FolderZipIcon from '@mui/icons-material/FolderZip'
 import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
-import { chatChannelApi, ChatMessage, ChatMessageSegment } from '../../../../services/api/chat-channel'
+import { chatChannelApi, ChatMessage, ChatMessageSegment, ForwardMessageItem } from '../../../../services/api/chat-channel'
 import { useTranslation } from 'react-i18next'
 
 // 防抖函数
@@ -345,6 +347,143 @@ function JsonCardComponent({
 }
 
 /** 渲染消息内容（支持图文混排） */
+/** 合并转发消息可折叠卡片（类QQ样式） */
+function ForwardMessageCard({
+  forwardContent,
+  isDark,
+  chatKey,
+}: {
+  forwardContent: ForwardMessageItem[]
+  isDark: boolean
+  chatKey: string
+}) {
+  const theme = useTheme()
+  const [open, setOpen] = useState(false)
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null)
+  const previewItems = forwardContent.slice(0, 3)
+  const totalCount = forwardContent.length
+
+  return (
+    <>
+    <Box
+      sx={{
+        my: 0.5,
+        borderRadius: '8px',
+        border: `1px solid ${theme.palette.divider}`,
+        bgcolor: isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)',
+        overflow: 'hidden',
+        maxWidth: 320,
+      }}
+    >
+      {/* 预览区（折叠时显示前3条，图片用[图片]占位） */}
+      <Box
+        onClick={() => setOpen(!open)}
+        sx={{
+          p: 1,
+          pl: 1.5,
+          cursor: 'pointer',
+          '&:hover': { bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)' },
+          transition: 'background 0.15s',
+        }}
+      >
+        {!open && previewItems.map((item, i) => (
+          <Typography key={i} variant="body2" noWrap sx={{ fontSize: '12px', lineHeight: 1.5, color: theme.palette.text.primary }}>
+            <Box component="span" sx={{ fontWeight: 600, mr: 0.5 }}>{item.sender}:</Box>
+            {item.content}
+          </Typography>
+        ))}
+        {open && (
+          <Typography variant="caption" sx={{ fontWeight: 600, color: theme.palette.text.secondary }}>
+            [合并转发消息]
+          </Typography>
+        )}
+      </Box>
+
+      {/* 展开的完整内容（图片可点击预览） */}
+      <Collapse in={open}>
+        <Box sx={{ px: 1.5, pb: 1, maxHeight: 400, overflowY: 'auto' }}>
+          {forwardContent.map((item, i) => (
+            <Box key={i} sx={{ mb: 0.5 }}>
+              <Typography variant="body2" component="div" sx={{ fontSize: '12px', lineHeight: 1.6, color: theme.palette.text.primary }}>
+                <Box component="span" sx={{ fontWeight: 600, mr: 0.5 }}>{item.sender}:</Box>
+                {item.forward_content && item.forward_content.length > 0 ? null : item.content}
+              </Typography>
+              {/* 嵌套合并转发 */}
+              {item.forward_content && item.forward_content.length > 0 && (
+                <ForwardMessageCard
+                  forwardContent={item.forward_content}
+                  isDark={isDark}
+                  chatKey={chatKey}
+                />
+              )}
+              {item.images.length > 0 && item.images.map((fileName, j) => {
+                const src = `/api/common/uploads/${encodeURIComponent(chatKey)}/${encodeURIComponent(fileName)}`
+                return (
+                  <Box key={j} sx={{ my: 0.5 }}>
+                    <img
+                      src={src}
+                      alt={fileName}
+                      onClick={(e) => { e.stopPropagation(); setPreviewSrc(src) }}
+                      style={{ maxWidth: '100%', maxHeight: 200, borderRadius: 6, cursor: 'pointer', display: 'block' }}
+                      loading="lazy"
+                      onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+                    />
+                  </Box>
+                )
+              })}
+            </Box>
+          ))}
+        </Box>
+      </Collapse>
+
+      {/* 底部栏 */}
+      <Box
+        onClick={() => setOpen(!open)}
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          px: 1.5,
+          py: 0.5,
+          borderTop: `1px solid ${theme.palette.divider}`,
+          cursor: 'pointer',
+          '&:hover': { bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)' },
+        }}
+      >
+        <Typography variant="caption" sx={{ color: theme.palette.text.disabled, fontSize: '11px' }}>
+          {open ? '收起' : `查看${totalCount}条转发消息`}
+        </Typography>
+        <ExpandMoreIcon
+          sx={{
+            fontSize: 16,
+            color: theme.palette.text.disabled,
+            transform: open ? 'rotate(180deg)' : 'none',
+            transition: 'transform 0.2s',
+          }}
+        />
+      </Box>
+    </Box>
+
+    {/* 图片预览弹窗 */}
+    {previewSrc && (
+      <Dialog
+        open
+        onClose={() => setPreviewSrc(null)}
+        maxWidth={false}
+        PaperProps={{ sx: { bgcolor: 'transparent', boxShadow: 'none', maxWidth: '90vw', maxHeight: '90vh' } }}
+      >
+        <img
+          src={previewSrc}
+          alt="preview"
+          onClick={() => setPreviewSrc(null)}
+          style={{ maxWidth: '90vw', maxHeight: '90vh', objectFit: 'contain', cursor: 'pointer', borderRadius: 4 }}
+        />
+      </Dialog>
+    )}
+    </>
+  )
+}
+
 function MessageContent({
   message,
   noContentText,
@@ -437,6 +576,17 @@ function MessageContent({
               key={i}
               segment={seg}
               isDark={theme.palette.mode === 'dark'}
+            />
+          )
+        }
+
+        if (seg.type === 'forward' && seg.forward_content) {
+          return (
+            <ForwardMessageCard
+              key={i}
+              forwardContent={seg.forward_content}
+              isDark={theme.palette.mode === 'dark'}
+              chatKey={message.chat_key}
             />
           )
         }

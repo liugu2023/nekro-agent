@@ -44,6 +44,15 @@ export interface ChatMessageSegment {
   card_preview?: string
   card_url?: string
   share_from_nick?: string
+  // forward
+  forward_content?: ForwardMessageItem[]
+}
+
+export interface ForwardMessageItem {
+  sender: string
+  content: string
+  images: string[]
+  forward_content?: ForwardMessageItem[]
 }
 
 export interface ChatMessage {
