@@ -698,7 +698,7 @@ class CoreConfig(ConfigBase):
         ).model_dump(),
     )
     AI_CHAT_DAILY_REPLY_WHITELIST_USERS: List[str] = Field(
-        default=[],
+        default_factory=list,
         title="配额白名单用户",
         description="不受每日回复数量限制的用户 ID 列表，这些用户的消息不受配额限制",
         json_schema_extra=ExtraField(
@@ -1122,7 +1122,9 @@ except Exception as e:
     print("应用将退出...")
     exit(1)
 
-config.dump_config()
+# 仅在配置文件不存在时创建默认配置
+if not CONFIG_PATH.exists():
+    config.dump_config()
 
 
 def save_config():
@@ -1136,7 +1138,11 @@ def reload_config():
     global config
 
     new_config = CoreConfig.load_config()
-    # 更新配置字段
+    # 更新配置字段，对可变类型进行深拷贝以避免引用共享
+    import copy
     for field_name in CoreConfig.model_fields:
         value = getattr(new_config, field_name)
+        # 对列表、字典等可变类型进行深拷贝
+        if isinstance(value, (list, dict)):
+            value = copy.deepcopy(value)
         setattr(config, field_name, value)
