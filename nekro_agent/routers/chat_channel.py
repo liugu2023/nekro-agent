@@ -260,7 +260,8 @@ async def get_chat_channel_messages(
     def _safe_ref_msg_id(msg: DBChatMessage) -> str:
         try:
             return msg.ext_data_obj.ref_msg_id or ""
-        except Exception:
+        except (AttributeError, KeyError, ValueError) as e:
+            logger.debug(f"Failed to parse ref_msg_id for msg {msg.id}: {e}")
             return ""
 
     items: List[ChatMessage] = []

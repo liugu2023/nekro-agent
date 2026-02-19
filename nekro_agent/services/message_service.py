@@ -255,7 +255,7 @@ class MessageService:
                 # 使用magic库检测文件MIME类型
                 file_path = Path(msg.content)
                 if file_path.exists():
-                    mime_type = magic.from_buffer(file_path.read_bytes(), mime=True)
+                    mime_type = magic.from_file(str(file_path), mime=True)
                     # 复制文件到uploads目录
                     local_path, file_name = await copy_to_upload_dir(
                         str(file_path),
