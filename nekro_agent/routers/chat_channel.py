@@ -434,9 +434,10 @@ async def send_message_to_channel(
 
     # none 类型：添加命令输出前缀，确保不进入上下文
     if sender_type == "none" and text:
-        from nekro_agent.core.config import config as app_config
+        from nekro_agent.services.config_resolver import config_resolver
 
-        text = f"{app_config.AI_COMMAND_OUTPUT_PREFIX}{text}"
+        effective_config = await config_resolver.get_effective_config(chat_key)
+        text = f"{effective_config.AI_COMMAND_OUTPUT_PREFIX}{text}"
 
     if not text and not file:
         return SendMessageResponse(ok=False, error="消息内容不能为空")
