@@ -247,6 +247,12 @@ async def delete_preset(
     if not preset:
         raise NotFoundError(resource="人设")
 
+    # 检查全局配置是否引用了该人设
+    from nekro_agent.core.config import config
+    if config.AI_CHAT_PRESET_ID == str(preset_id):
+        # 用户尝试删除正在使用的默认人设
+        raise ValidationError(reason=f"无法删除当前正在使用的默认人设（ID: {preset_id}），请先切换到其他人设后再删除")
+
     await preset.delete()
     return ActionResponse(ok=True)
 
