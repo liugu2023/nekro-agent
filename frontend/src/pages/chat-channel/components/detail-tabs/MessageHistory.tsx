@@ -37,6 +37,7 @@ import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { chatChannelApi, ChatMessage, ChatMessageSegment } from '../../../../services/api/chat-channel'
 import { useTranslation } from 'react-i18next'
+import MarkdownRenderer from '../../../../components/common/MarkdownRenderer'
 
 // 防抖函数
 function debounce<T extends (...args: unknown[]) => unknown>(
@@ -90,6 +91,24 @@ function nameToColor(name: string): string {
   const hue = Math.abs(hash) % 360
   return `hsl(${hue}, 55%, 55%)`
 }
+
+/** 聊天气泡内 Markdown 紧凑样式 */
+const chatMarkdownSx = {
+  '& p': { m: 0, lineHeight: 1.6, color: 'text.primary' },
+  '& p + p': { mt: 0.5 },
+  '& h1, & h2, & h3, & h4, & h5, & h6': {
+    mt: 1, mb: 0.5, fontSize: '14px', fontWeight: 600, borderBottom: 'none', pb: 0,
+  },
+  '& ul, & ol': { my: 0.5, pl: 2.5 },
+  '& li': { mb: 0, lineHeight: 1.6 },
+  '& pre': { my: 0.5, p: 1, fontSize: '12px' },
+  '& blockquote': { my: 0.5, py: 0.5, px: 1.5 },
+  '& table': { mb: 0.5 },
+  '& hr': { my: 1 },
+  fontSize: '13.5px',
+  wordBreak: 'break-word',
+  overflowWrap: 'break-word',
+} as const
 
 /** 从 local_path 提取文件名 */
 function extractFileName(localPath: string): string {
@@ -361,26 +380,17 @@ function MessageContent({
 
   // 没有 content_data 时回退到纯文本
   if (segments.length === 0) {
-    return (
-      <>
+    if (!message.content) {
+      return (
         <Typography
           variant="body2"
-          sx={{
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            overflowWrap: 'break-word',
-            fontSize: '13.5px',
-            lineHeight: 1.6,
-            color: message.content
-              ? theme.palette.text.primary
-              : theme.palette.text.disabled,
-            fontStyle: message.content ? 'normal' : 'italic',
-          }}
+          sx={{ fontSize: '13.5px', color: theme.palette.text.disabled, fontStyle: 'italic' }}
         >
-          {message.content || noContentText}
+          {noContentText}
         </Typography>
-      </>
-    )
+      )
+    }
+    return <MarkdownRenderer sx={chatMarkdownSx}>{message.content}</MarkdownRenderer>
   }
 
   return (
@@ -443,24 +453,12 @@ function MessageContent({
           )
         }
 
-        // text：渲染文本
+        // text：渲染文本（支持 Markdown）
         if (seg.text) {
           return (
-            <Typography
-              key={i}
-              variant="body2"
-              component="span"
-              sx={{
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                overflowWrap: 'break-word',
-                fontSize: '13.5px',
-                lineHeight: 1.6,
-                color: theme.palette.text.primary,
-              }}
-            >
+            <MarkdownRenderer key={i} sx={chatMarkdownSx}>
               {seg.text}
-            </Typography>
+            </MarkdownRenderer>
           )
         }
 
@@ -877,6 +875,7 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
                     >
                       <Typography
                         variant="caption"
+                        component="div"
                         sx={{
                           fontSize: '12px',
                           color: theme.palette.text.secondary,
@@ -887,9 +886,13 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
                           bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
                           border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}`,
                           maxWidth: '80%',
+                          wordBreak: 'break-word',
                         }}
                       >
-                        {message.content || message.sender_nickname}
+                        {message.content
+                          ? <MarkdownRenderer sx={{ ...chatMarkdownSx, fontSize: '12px', '& p': { m: 0, lineHeight: 1.5 } }}>{message.content}</MarkdownRenderer>
+                          : message.sender_nickname
+                        }
                       </Typography>
                     </Box>
                   </Box>
