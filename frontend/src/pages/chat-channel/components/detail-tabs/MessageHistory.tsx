@@ -766,11 +766,10 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
     setTimeout(() => inputRef.current?.focus(), 0)
   }
 
-  // 按时间正序排列消息，过滤掉 SYSTEM 内部消息（agent 方法返回等）
+  // 按时间正序排列消息
   const allMessages =
     data?.pages
       .flatMap(page => page.items)
-      .filter(msg => msg.sender_name !== 'SYSTEM')
       .sort((a, b) => new Date(a.create_time).getTime() - new Date(b.create_time).getTime()) || []
 
   // 构建 message_id -> ChatMessage 的映射，用于引用消息查找
@@ -837,14 +836,65 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
         ) : (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
             {allMessages.map((message, index) => {
-              const isBot = message.sender_id === BOT_SENDER_ID
+              const isBot = message.sender_id === BOT_SENDER_ID && message.sender_name !== 'SYSTEM'
+              const isSystem = message.sender_name === 'SYSTEM'
               const prevMsg = index > 0 ? allMessages[index - 1] : null
               const showDivider = prevMsg && needTimeDivider(prevMsg, message)
-              // 同一发送者连续消息合并头像
+              // 同一发送者连续消息合并头像（需同时匹配 sender_id 和 sender_name，避免 SYSTEM 与 Bot 合并）
               const isContinuation =
                 prevMsg &&
                 !showDivider &&
-                prevMsg.sender_id === message.sender_id
+                prevMsg.sender_id === message.sender_id &&
+                prevMsg.sender_name === message.sender_name
+
+              // 系统消息居中渲染
+              if (isSystem) {
+                return (
+                  <Box key={message.id} data-message-id={message.message_id || undefined}>
+                    {showDivider && (
+                      <Box sx={{ display: 'flex', justifyContent: 'center', py: 1.5, my: 0.5 }}>
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            color: theme.palette.text.disabled,
+                            fontSize: '11px',
+                            background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)',
+                            px: 1.5, py: 0.3, borderRadius: '10px',
+                          }}
+                        >
+                          {message.create_time}
+                        </Typography>
+                      </Box>
+                    )}
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        py: 1,
+                        my: 0.5,
+                      }}
+                    >
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          fontSize: '12px',
+                          color: theme.palette.text.secondary,
+                          fontStyle: 'italic',
+                          px: 1.5,
+                          py: 0.5,
+                          borderRadius: '4px',
+                          bgcolor: isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)',
+                          border: `1px solid ${isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.08)'}`,
+                          maxWidth: '80%',
+                        }}
+                      >
+                        {message.content || message.sender_nickname}
+                      </Typography>
+                    </Box>
+                  </Box>
+                )
+              }
 
               return (
                 <Box key={message.id} data-message-id={message.message_id || undefined}>
