@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import json5
@@ -7,10 +8,14 @@ from tortoise.expressions import Q
 
 from nekro_agent.adapters import get_adapter
 from nekro_agent.core.logger import get_sub_logger
+from nekro_agent.core.os_env import USER_UPLOAD_DIR
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_user import DBUser
+from nekro_agent.schemas.agent_message import AgentMessageSegment, AgentMessageSegmentType
 from nekro_agent.schemas.errors import NotFoundError
+from nekro_agent.services.config_resolver import config_resolver
+from nekro_agent.services.message_service import message_service
 from nekro_agent.services.user.deps import get_current_active_user
 from nekro_agent.services.user.perm import Role, require_role
 
@@ -176,7 +181,6 @@ async def get_chat_channel_detail(chat_key: str, _current_user: DBUser = Depends
     # 获取频道有效配置
     ai_always_include_msg_id = False
     try:
-        from nekro_agent.services.config_resolver import config_resolver
         effective_config = await config_resolver.get_effective_config(chat_key)
         ai_always_include_msg_id = effective_config.AI_ALWAYS_INCLUDE_MSG_ID
     except Exception:
@@ -409,8 +413,6 @@ async def send_message_to_channel(
         if not text:
             return SendMessageResponse(ok=False, error="SYSTEM 消息内容不能为空")
         try:
-            from nekro_agent.services.message_service import message_service
-
             await message_service.push_system_message(
                 chat_key=chat_key,
                 agent_messages=text,
@@ -434,8 +436,6 @@ async def send_message_to_channel(
 
     # none 类型：添加命令输出前缀，确保不进入上下文
     if sender_type == "none" and text:
-        from nekro_agent.services.config_resolver import config_resolver
-
         effective_config = await config_resolver.get_effective_config(chat_key)
         text = f"{effective_config.AI_COMMAND_OUTPUT_PREFIX}{text}"
 
@@ -443,10 +443,6 @@ async def send_message_to_channel(
         return SendMessageResponse(ok=False, error="消息内容不能为空")
 
     try:
-        from pathlib import Path
-
-        from nekro_agent.core.os_env import USER_UPLOAD_DIR
-        from nekro_agent.schemas.agent_message import AgentMessageSegment, AgentMessageSegmentType
         from nekro_agent.services.chat.universal_chat_service import universal_chat_service
 
         segments: list[AgentMessageSegment] = []
