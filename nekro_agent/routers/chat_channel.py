@@ -1,8 +1,10 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import json
 
 import json5
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from tortoise.expressions import Q
 
@@ -515,10 +517,6 @@ async def stream_chat_channel_messages(
     Raises:
         NotFoundError: 当频道不存在时
     """
-    import json
-
-    from fastapi.responses import StreamingResponse
-
     from nekro_agent.services.message_broadcaster import message_broadcaster
 
     channel = await DBChatChannel.get_or_none(chat_key=chat_key)
@@ -549,6 +547,8 @@ async def stream_chat_channel_messages(
                                 content_data.append(str(item))
 
                 # 构建消息字典格式，用于SSE发送
+                from datetime import datetime
+                create_time = datetime.fromtimestamp(message.send_timestamp).strftime("%Y-%m-%d %H:%M:%S") if hasattr(message, 'send_timestamp') and message.send_timestamp else ""
                 message_dict = {
                     "id": 0,  # 实时消息没有数据库ID
                     "sender_id": str(message.sender_id),
@@ -558,7 +558,7 @@ async def stream_chat_channel_messages(
                     "content": message.content_text,
                     "content_data": content_data,
                     "chat_key": message.chat_key,
-                    "create_time": "",  # 前端可使用当前时间
+                    "create_time": create_time,
                     "message_id": message.message_id or "",
                     "ref_msg_id": getattr(message, "ref_msg_id", "") or "",
                 }
