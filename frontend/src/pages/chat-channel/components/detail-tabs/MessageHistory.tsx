@@ -572,6 +572,39 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
     },
   })
 
+  // 实时消息流订阅 (SSE)
+  useEffect(() => {
+    let cleanup: (() => void) | undefined
+
+    const handleNewMessage = (message: ChatMessage) => {
+      // 将消息添加到 React Query 缓存的最后一页
+      queryClient.setQueryData(['chat-messages', chatKey], (oldData: any) => {
+        if (!oldData?.pages) return oldData
+
+        const newPages = [...oldData.pages]
+        const lastPage = { ...newPages[newPages.length - 1] }
+        lastPage.items = [...lastPage.items, message]
+        newPages[newPages.length - 1] = lastPage
+
+        return { ...oldData, pages: newPages }
+      })
+
+      // 如果用户在底部，自动滚动到最新消息
+      if (autoScroll) {
+        setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
+      }
+    }
+
+    // 仅在启用 AI_ALWAYS_INCLUDE_MSG_ID 功能时订阅
+    if (aiAlwaysIncludeMsgId && chatKey) {
+      cleanup = chatChannelApi.streamMessages(chatKey, handleNewMessage, (error) => {
+        console.error('Message stream error:', error)
+      })
+    }
+
+    return () => cleanup?.()
+  }, [chatKey, aiAlwaysIncludeMsgId, queryClient, autoScroll])
+
   // 自动滚动到底部（仅初始加载时）
   useEffect(() => {
     if (!isLoading && initialLoad && messagesEndRef.current) {
@@ -841,78 +874,6 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
                     </Box>
                   )}
 
-                  {/* 引用消息预览 */}
-                  {aiAlwaysIncludeMsgId && message.ref_msg_id && (() => {
-                    const refMsg = messageByMsgId.get(message.ref_msg_id)
-                    return (
-                      <Box
-                        sx={{
-                          display: 'flex',
-                          flexDirection: isBot ? 'row-reverse' : 'row',
-                          px: 1,
-                          mt: 0.5,
-                          mb: -0.3,
-                        }}
-                      >
-                        {/* 头像占位对齐 */}
-                        <Box sx={{ width: 36, flexShrink: 0 }} />
-                        <Box
-                          onClick={() => refMsg ? scrollToMessage(message.ref_msg_id!) : undefined}
-                          sx={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 0.5,
-                            maxWidth: '70%',
-                            ml: isBot ? 0 : 1,
-                            mr: isBot ? 1 : 0,
-                            pl: 1,
-                            pr: 1.5,
-                            py: 0.3,
-                            borderLeft: `2.5px solid ${theme.palette.primary.main}`,
-                            borderRadius: '0 6px 6px 0',
-                            bgcolor: isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)',
-                            cursor: refMsg ? 'pointer' : 'default',
-                            transition: 'background 0.15s',
-                            '&:hover': refMsg ? {
-                              bgcolor: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)',
-                            } : {},
-                          }}
-                        >
-                          <ReplyIcon sx={{ fontSize: 14, color: theme.palette.text.disabled, transform: 'scaleX(-1)' }} />
-                          {refMsg ? (
-                            <Typography
-                              variant="caption"
-                              sx={{
-                                fontSize: '11.5px',
-                                color: theme.palette.text.secondary,
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                                lineHeight: 1.4,
-                              }}
-                            >
-                              <Box component="span" sx={{ fontWeight: 600, color: theme.palette.text.primary, mr: 0.5 }}>
-                                {refMsg.sender_nickname || refMsg.sender_name}
-                              </Box>
-                              {refMsg.content || '...'}
-                            </Typography>
-                          ) : (
-                            <Typography
-                              variant="caption"
-                              sx={{
-                                fontSize: '11.5px',
-                                color: theme.palette.text.disabled,
-                                fontStyle: 'italic',
-                              }}
-                            >
-                              {t('messageHistory.quotedMessage')}
-                            </Typography>
-                          )}
-                        </Box>
-                      </Box>
-                    )
-                  })()}
-
                   {/* 气泡布局 */}
                   <Box
                       sx={{
@@ -1025,6 +986,96 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
                             },
                           }}
                         >
+                          {/* 引用消息 - QQ风格内嵌气泡 */}
+                          {aiAlwaysIncludeMsgId && message.ref_msg_id && (() => {
+                            const refMsg = messageByMsgId.get(message.ref_msg_id)
+                            return (
+                              <Box
+                                onClick={() => refMsg ? scrollToMessage(message.ref_msg_id!) : undefined}
+                                sx={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 0.5,
+                                  width: '100%',
+                                  mb: 0.6,
+                                  pl: 1,
+                                  pr: 0.5,
+                                  py: 0.5,
+                                  borderLeft: `2px solid ${theme.palette.primary.main}`,
+                                  borderRadius: '2px',
+                                  bgcolor: isDark ? 'rgba(0,0,0,0.15)' : 'rgba(0,0,0,0.04)',
+                                  cursor: refMsg ? 'pointer' : 'default',
+                                  transition: 'background 0.15s',
+                                  boxSizing: 'border-box',
+                                  overflow: 'hidden',
+                                  '&:hover': refMsg ? {
+                                    bgcolor: isDark ? 'rgba(0,0,0,0.25)' : 'rgba(0,0,0,0.07)',
+                                  } : {},
+                                }}
+                              >
+                                <ReplyIcon sx={{ fontSize: 13, color: theme.palette.text.disabled, transform: 'scaleX(-1)', flexShrink: 0 }} />
+                                {refMsg ? (
+                                  <Typography
+                                    component="div"
+                                    variant="caption"
+                                    sx={{
+                                      fontSize: '11px',
+                                      color: theme.palette.text.secondary,
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      whiteSpace: 'nowrap',
+                                      lineHeight: 1.4,
+                                      minWidth: 0,
+                                    }}
+                                  >
+                                    <Box component="span" sx={{ fontWeight: 600, fontSize: '11px', color: theme.palette.text.primary, mr: 0.5 }}>
+                                      {refMsg.sender_nickname || refMsg.sender_name}
+                                    </Box>
+                                    {(refMsg.content_data && refMsg.content_data.length > 0)
+                                      ? refMsg.content_data.map((seg, idx) => {
+                                          if (seg.type === 'at') {
+                                            return (
+                                              <Box
+                                                key={idx}
+                                                component="span"
+                                                sx={{
+                                                  color: theme.palette.primary.main,
+                                                  fontWeight: 600,
+                                                }}
+                                              >
+                                                @{seg.target_nickname || 'User'}
+                                              </Box>
+                                            )
+                                          }
+                                          if (seg.type === 'text') {
+                                            return <span key={idx}>{seg.text}</span>
+                                          }
+                                          if (seg.type === 'image') {
+                                            return <span key={idx} style={{ color: theme.palette.text.disabled }}>[图片]</span>
+                                          }
+                                          if (seg.type === 'file' || seg.type === 'voice' || seg.type === 'video') {
+                                            return <span key={idx} style={{ color: theme.palette.text.disabled }}>[{seg.type === 'voice' ? '语音' : seg.type === 'video' ? '视频' : '文件'}]</span>
+                                          }
+                                          return null
+                                        })
+                                      : (refMsg.content || '...')
+                                    }
+                                  </Typography>
+                                ) : (
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      fontSize: '11px',
+                                      color: theme.palette.text.disabled,
+                                      fontStyle: 'italic',
+                                    }}
+                                  >
+                                    {t('messageHistory.quotedMessage')}
+                                  </Typography>
+                                )}
+                              </Box>
+                            )
+                          })()}
                           <MessageContent
                             message={message}
                             noContentText={t('messageHistory.noContent')}
@@ -1137,11 +1188,18 @@ export default function MessageHistory({ chatKey, canSend = false, aiAlwaysInclu
           <ToggleButton value="system">{t('messageHistory.senderSystem')}</ToggleButton>
           <ToggleButton value="none">{t('messageHistory.senderNone')}</ToggleButton>
         </ToggleButtonGroup>
-        {senderType === 'none' && (
-          <Typography variant="caption" sx={{ color: theme.palette.warning.main, fontSize: '11px' }}>
-            {t('messageHistory.senderNoneHint')}
-          </Typography>
-        )}
+        <Typography variant="caption" sx={{
+          color: senderType === 'none' ? theme.palette.warning.main : theme.palette.text.secondary,
+          fontSize: '11px',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          minWidth: 0,
+        }}>
+          {senderType === 'bot' && t('messageHistory.senderBotHint')}
+          {senderType === 'system' && t('messageHistory.senderSystemHint')}
+          {senderType === 'none' && t('messageHistory.senderNoneHint')}
+        </Typography>
       </Box>
       <Box
         sx={{
