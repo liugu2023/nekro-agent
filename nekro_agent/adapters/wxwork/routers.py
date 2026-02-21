@@ -63,15 +63,19 @@ async def verify_url(
         timestamp_decoded = urllib.parse.unquote(timestamp)
         nonce_decoded = urllib.parse.unquote(nonce)
 
+        # 对于自建应用，receive_id 是 corp_id
+        receive_id = _adapter.config.CORP_ID if _adapter.config.CORP_ID else ""
+
         # 验证并解密 echostr，得到 msg 字段内容
         decrypted_msg = _adapter.crypto.verify_url(
             msg_signature=msg_signature_decoded,
             timestamp=timestamp_decoded,
             nonce=nonce_decoded,
             echostr=echostr_decoded,
+            receive_id=receive_id,
         )
 
-        logger.success(f"企业微信智能机器人 URL 验证成功，解密内容: {decrypted_msg[:100]}")
+        logger.success(f"企业微信 URL 验证成功，解密内容: {decrypted_msg[:100]}")
 
         # 返回明文消息内容（不加引号，不带换行符）
         return PlainTextResponse(content=decrypted_msg.strip(), status_code=200)
@@ -84,7 +88,7 @@ async def verify_url(
         return PlainTextResponse(content="Internal error", status_code=500)
 
 
-@router.post("/callback", summary="接收企业微信智能机器人消息")
+@router.post("/callback", summary="接收企业微信消息")
 async def receive_message(
     request: Request,
     msg_signature: str = Query(..., description="企业微信加密签名"),
@@ -92,14 +96,14 @@ async def receive_message(
     nonce: str = Query(..., description="随机数"),
 ) -> Response:
     """
-    接收企业微信智能机器人消息接口（POST 请求）
+    接收企业微信消息接口（POST 请求）
 
     企业微信会将用户消息通过 POST 请求推送到此接口。
-    消息格式为 JSON: {"encrypt": "msg_encrypt"}
+    消息格式为 XML: <xml><Encrypt>...</Encrypt></xml>
 
     需要：
     1. 验证签名是否正确
-    2. 解密 encrypt 字段得到消息明文 JSON
+    2. 解密 Encrypt 字段得到消息明文 JSON
     3. 处理消息内容
     4. 可选：直接回复消息或返回空包
 
@@ -109,8 +113,8 @@ async def receive_message(
         logger.error("企业微信适配器未初始化")
         return Response(content="", status_code=200)  # 返回空包避免重复推送
 
-    if not _adapter.crypto:
-        logger.error("企业微信加密工具未初始化，请检查配置")
+    if not _adapter.crypto or not _adapter.message_processor:
+        logger.error("企业微信加密工具或消息处理器未初始化，请检查配置")
         return Response(content="", status_code=200)
 
     try:
@@ -121,23 +125,11 @@ async def receive_message(
         logger.debug(f"收到企业微信消息，签名: {msg_signature}, 时间戳: {timestamp}, nonce: {nonce}")
         logger.debug(f"请求体长度: {len(body_text)}, 前200字符: {body_text[:200]}")
 
-        # 2. 解析请求体提取 encrypt 字段（兼容 JSON 和 XML 两种格式）
-        import json
-        import xml.etree.ElementTree as ET
-
+        # 2. 解析请求体提取 Encrypt 字段（企业自建应用使用 XML 格式）
         encrypt_msg = None
 
-        # 尝试解析 JSON 格式
-        if body_text.strip().startswith("{"):
-            try:
-                request_data = json.loads(body_text)
-                encrypt_msg = request_data.get("encrypt")
-                logger.debug("成功解析 JSON 格式消息体")
-            except json.JSONDecodeError:
-                logger.warning("JSON 格式解析失败，尝试 XML 格式")
-
         # 尝试解析 XML 格式
-        if not encrypt_msg and body_text.strip().startswith("<"):
+        if body_text.strip().startswith("<"):
             try:
                 root = ET.fromstring(body_text)
                 encrypt_element = root.find("Encrypt")
@@ -147,26 +139,40 @@ async def receive_message(
             except ET.ParseError as e:
                 logger.error(f"XML 格式解析失败: {e}")
 
+        # 兼容 JSON 格式（部分老版本可能使用 JSON）
+        if not encrypt_msg and body_text.strip().startswith("{"):
+            try:
+                request_data = json.loads(body_text)
+                encrypt_msg = request_data.get("encrypt")
+                logger.debug("成功解析 JSON 格式消息体")
+            except json.JSONDecodeError:
+                logger.warning("JSON 格式解析失败")
+
         if not encrypt_msg:
-            logger.error(f"无法从请求体中提取 encrypt 字段，请求体: {body_text[:500]}")
+            logger.error(f"无法从请求体中提取 Encrypt 字段，请求体: {body_text[:500]}")
             return Response(content="", status_code=200)
 
         # 3. 解密消息
+        # 对于自建应用，receive_id 是 corp_id
+        receive_id = _adapter.config.CORP_ID if _adapter.config.CORP_ID else ""
+
         message_data = _adapter.crypto.decrypt_message(
             msg_signature=msg_signature,
             timestamp=timestamp,
             nonce=nonce,
             encrypt_data=encrypt_msg,
+            receive_id=receive_id,
         )
 
-        logger.info("成功解密企业微信智能机器人消息")
+        logger.info("成功解密企业微信消息")
         logger.debug(f"消息内容: {json.dumps(message_data, ensure_ascii=False, indent=2)}")
 
         # 4. 处理消息（异步，不阻塞响应）
-        # TODO: 在后续开发中实现消息处理逻辑
-        # asyncio.create_task(_adapter.handle_message(message_data, nonce, timestamp))
+        import asyncio
 
-        # 5. 返回空包表示接收成功（也可以选择直接回复消息）
+        asyncio.create_task(_adapter.message_processor.process_message(message_data))
+
+        # 5. 返回空包表示接收成功
         return Response(content="", status_code=200)
 
     except ValueError as e:
@@ -179,23 +185,26 @@ async def receive_message(
 
 @router.get("/info", summary="获取企业微信适配器信息")
 async def get_adapter_info():
-    """获取企业微信智能机器人适配器信息"""
+    """获取企业微信自建应用适配器信息"""
     if not _adapter:
         return {
             "adapter": "wxwork",
-            "type": "智能机器人",
+            "type": "自建应用",
             "status": "not_initialized",
             "message": "企业微信适配器未初始化",
         }
 
     config = _adapter.config
-    is_configured = bool(config.TOKEN and config.ENCODING_AES_KEY)
+    is_configured = config.is_configured
 
     return {
         "adapter": "wxwork",
-        "type": "智能机器人",
+        "type": "自建应用",
         "status": "ready" if is_configured else "not_configured",
-        "message": "企业微信智能机器人适配器已准备就绪" if is_configured else "请在配置文件中填写 Token 和 EncodingAESKey",
+        "message": "企业微信自建应用适配器已准备就绪" if is_configured else "请在配置文件中填写 CORP_ID、CORP_SECRET、AGENT_ID、Token 和 EncodingAESKey",
+        "corp_id_configured": bool(config.CORP_ID),
+        "corp_secret_configured": bool(config.CORP_SECRET),
+        "agent_id_configured": bool(config.AGENT_ID),
         "token_configured": bool(config.TOKEN),
         "encoding_aes_key_configured": bool(config.ENCODING_AES_KEY),
     }
