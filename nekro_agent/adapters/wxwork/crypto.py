@@ -31,7 +31,7 @@ class WxWorkBotCrypt:
         # EncodingAESKey 是 43 位字符，补齐 '=' 后进行 base64 解码得到 32 字节的 AES 密钥
         self.aes_key = base64.b64decode(encoding_aes_key + "=")
 
-    def verify_url(self, msg_signature: str, timestamp: str, nonce: str, echostr: str) -> str:
+    def verify_url(self, msg_signature: str, timestamp: str, nonce: str, echostr: str, receive_id: str = "") -> str:
         """验证 URL 有效性（GET 请求）
 
         Args:
@@ -39,6 +39,7 @@ class WxWorkBotCrypt:
             timestamp: 时间戳
             nonce: 随机数
             echostr: 加密的随机字符串
+            receive_id: 接收者 ID（自建应用传 corp_id，智能机器人传空字符串）
 
         Returns:
             解密后的 echostr 明文（msg 字段内容），用于返回给企业微信
@@ -52,16 +53,17 @@ class WxWorkBotCrypt:
             raise ValueError(f"签名验证失败: {signature} != {msg_signature}")
 
         # 2. 解密 echostr，获取其中的 msg 字段
-        return self._decrypt(echostr, receive_id="")
+        return self._decrypt(echostr, receive_id=receive_id)
 
-    def decrypt_message(self, msg_signature: str, timestamp: str, nonce: str, encrypt_data: str) -> dict:
+    def decrypt_message(self, msg_signature: str, timestamp: str, nonce: str, encrypt_data: str, receive_id: str = "") -> dict:
         """解密消息（POST 请求）
 
         Args:
             msg_signature: 企业微信加密签名
             timestamp: 时间戳
             nonce: 随机数
-            encrypt_data: 加密的消息内容（来自 JSON 的 encrypt 字段）
+            encrypt_data: 加密的消息内容（来自 JSON 或 XML 的 encrypt 字段）
+            receive_id: 接收者 ID（自建应用传 corp_id，智能机器人传空字符串）
 
         Returns:
             解密后的消息 JSON 对象
@@ -74,8 +76,8 @@ class WxWorkBotCrypt:
         if signature != msg_signature:
             raise ValueError(f"签名验证失败: {signature} != {msg_signature}")
 
-        # 2. 解密消息（智能机器人场景 receive_id 传空字符串）
-        decrypted_text = self._decrypt(encrypt_data, receive_id="")
+        # 2. 解密消息
+        decrypted_text = self._decrypt(encrypt_data, receive_id=receive_id)
 
         # 3. 解析 JSON
         try:
@@ -84,13 +86,14 @@ class WxWorkBotCrypt:
             logger.exception(f"解析解密后的消息 JSON 失败: {e}")
             raise ValueError(f"消息不是有效的 JSON 格式: {decrypted_text[:200]}") from e
 
-    def encrypt_message(self, reply_data: dict, nonce: str, timestamp: str) -> dict:
+    def encrypt_message(self, reply_data: dict, nonce: str, timestamp: str, receive_id: str = "") -> dict:
         """加密消息用于回复（POST 响应）
 
         Args:
             reply_data: 要回复的消息数据（dict 格式，会转换为 JSON）
             nonce: 随机数（使用回调 URL 中的 nonce）
             timestamp: 时间戳（秒级）
+            receive_id: 接收者 ID（自建应用传 corp_id，智能机器人传空字符串）
 
         Returns:
             加密后的完整响应对象（包含 encrypt、msgsignature、timestamp、nonce）
@@ -98,8 +101,8 @@ class WxWorkBotCrypt:
         # 1. 将 reply_data 转换为 JSON 字符串
         reply_json = json.dumps(reply_data, ensure_ascii=False)
 
-        # 2. 加密消息（智能机器人场景 receive_id 传空字符串）
-        encrypted = self._encrypt(reply_json, receive_id="")
+        # 2. 加密消息
+        encrypted = self._encrypt(reply_json, receive_id=receive_id)
 
         # 3. 生成签名
         signature = self._generate_signature(timestamp, nonce, encrypted)

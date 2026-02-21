@@ -32,7 +32,7 @@
     "wechatpad": "WeChatPad",
     "telegram": "Telegram",
     "email": "Email",
-    "wxwork": "WeWork Bot"
+    "wxwork": "企业微信"
   },
   "status": {
     "loaded": "已加载",
