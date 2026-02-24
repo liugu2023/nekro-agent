@@ -110,6 +110,26 @@ class DBChatMessage(Model):
         ).count()
 
     @classmethod
+    async def get_hourly_bot_reply_count(cls, chat_key: str) -> int:
+        """获取当前小时该频道的 Bot 回复数量（不含 SYSTEM 消息）"""
+        now = datetime.datetime.now()
+        hour_start = now.replace(minute=0, second=0, microsecond=0)
+        hour_start_timestamp = int(hour_start.timestamp())
+
+        count = (
+            await cls.filter(
+                chat_key=chat_key,
+                sender_id="-1",
+                send_timestamp__gte=hour_start_timestamp,
+            )
+            .exclude(sender_name="SYSTEM")
+            .count()
+        )
+
+        return count
+
+
+    @classmethod
     async def get_conversation_msg_count(cls, chat_key: str, conversation_start_timestamp: int) -> int:
         """获取当前会话的消息总数"""
         return await cls.filter(

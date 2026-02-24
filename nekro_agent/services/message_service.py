@@ -312,6 +312,24 @@ class MessageService:
                     )
                     return
 
+                # 检查每小时配额限制
+                if config.AI_CHAT_HOURLY_QUOTA_ENABLED:
+                    hourly_limit = quota_service.calculate_hourly_quota(effective_limit)
+                    hourly_count = await DBChatMessage.get_hourly_bot_reply_count(message.chat_key)
+                    if hourly_count >= hourly_limit:
+                        logger.info(
+                            f"聊天频道 {message.chat_key} 本小时回复数量已达上限 {hourly_limit}，跳过本次处理...",
+                        )
+                        from nekro_agent.services.chat.universal_chat_service import (
+                            universal_chat_service,
+                        )
+
+                        await universal_chat_service.send_operation_message(
+                            chat_key=message.chat_key,
+                            message=f"本小时回复数量已达上限 ({hourly_count}/{hourly_limit})，请稍候~",
+                        )
+                        return
+
             if signal not in [MsgSignal.CONTINUE, MsgSignal.FORCE_TRIGGER]:
                 logger.info(f"用户消息 {message.content_text} 被插件阻止触发，跳过本次处理...")
                 return

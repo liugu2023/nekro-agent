@@ -89,7 +89,7 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
     await finish_with(matcher, message=f"已重置 {target_chat_key} 的对话上下文（当前会话 {msg_cnt} 条消息已归档）")
 
 
-@on_command("stop", aliases={"na_stop", "na-stop"}, priority=5, block=True).handle()
+@on_command("stop-stream", aliases={"stop", "na_stop", "na-stop", "na_stop_stream", "na-stop-stream"}, priority=5, block=True).handle()
 async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
     """终止当前频道的回复流程"""
     username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
@@ -1129,8 +1129,27 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
             lines.append(f"临时提升: +{temp_boost}")
         lines.append(f"有效限额: {effective_limit}")
         lines.append(f"剩余额度: {remaining}")
+
+        # 每小时配额显示
+        if effective_config.AI_CHAT_HOURLY_QUOTA_ENABLED:
+            hourly_limit = quota_service.calculate_hourly_quota(effective_limit)
+            hourly_bot_count = await DBChatMessage.get_hourly_bot_reply_count(target_chat_key)
+            hourly_remaining = max(0, hourly_limit - hourly_bot_count)
+            lines.extend([
+                "",
+                "===== 每小时回复配额 =====",
+                f"本小时 Bot 回复: {hourly_bot_count}",
+                f"小时限额: {hourly_limit}",
+                f"剩余额度: {hourly_remaining}",
+            ])
     else:
         lines.append("配置限额: 无限制")
+        # 如果启用了小时配额但没有每日限额，显示提示
+        if effective_config.AI_CHAT_HOURLY_QUOTA_ENABLED:
+            lines.extend([
+                "",
+                "⚠️ 每小时配额已启用但每日限额为0，每小时配额不生效",
+            ])
 
     lines.extend([
         "",
@@ -1138,6 +1157,7 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
         f"当前会话消息数: {conv_msg_count}",
         f"上下文最大条数: {context_limit}",
     ])
+
 
     await finish_with(matcher, message="\n".join(lines))
 
@@ -1182,7 +1202,7 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
 
     args = cmd_content.strip().split()
     if not args:
-        await finish_with(matcher, message="请指定配额数量: quota_set <数量> [chat_key]\n设为 0 表示不限制")
+        await finish_with(matcher, message="请指定配额数量: quota_set <数量> [chat_key] [--hourly]\n设为 0 表示不限制，--hourly 启用每小时配额")
 
     try:
         amount = int(args[0])
@@ -1192,10 +1212,15 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
     target_chat_key = args[1] if len(args) > 1 else chat_key
     config_key = f"channel_config_{target_chat_key}"
 
+    # 检查是否有 --hourly 参数
+    enable_hourly = "--hourly" in args
+
     try:
         # 启用覆盖并设置值
         UnifiedConfigService.set_config_value(config_key, "enable_AI_CHAT_DAILY_REPLY_LIMIT", "true")
         UnifiedConfigService.set_config_value(config_key, "AI_CHAT_DAILY_REPLY_LIMIT", str(amount))
+        if enable_hourly:
+            UnifiedConfigService.set_config_value(config_key, "AI_CHAT_HOURLY_QUOTA_ENABLED", "true")
         UnifiedConfigService.save_config(config_key)
 
         # 清除缓存的 effective_config
@@ -1205,11 +1230,14 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
         await finish_with(matcher, message=f"设置失败: {e}")
 
     limit_str = str(amount) if amount > 0 else "无限制"
-    await finish_with(
-        matcher,
-        message=f"已为频道 {target_chat_key} 永久设置每日配额: {limit_str}\n"
-        f"(此设置将覆盖系统默认配置)",
-    )
+    msg = f"已为频道 {target_chat_key} 永久设置每日配额: {limit_str}\n(此设置将覆盖系统默认配置)"
+
+    if enable_hourly and amount > 0:
+        hourly_limit = quota_service.calculate_hourly_quota(amount)
+        msg += f"\n每小时配额已启用: {hourly_limit}/小时"
+
+    await finish_with(matcher, message=msg)
+
 
 
 @on_command("quota_reset", aliases={"quota-reset"}, priority=5, block=True).handle()
@@ -1241,7 +1269,49 @@ async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = Comm
     )
 
 
-@on_command("quota_whitelist", aliases={"quota-whitelist", "qwl"}, priority=5, block=True).handle()
+@on_command("quota_hourly", aliases={"quota-hourly"}, priority=5, block=True).handle()
+async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
+    """启用/禁用每小时配额限制"""
+    username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)
+
+    args = cmd_content.strip().split()
+    if not args or args[0] not in ["enable", "disable"]:
+        await finish_with(matcher, message="请指定操作: quota_hourly <enable|disable> [chat_key]")
+
+    action = args[0]
+    target_chat_key = args[1] if len(args) > 1 else chat_key
+    config_key = f"channel_config_{target_chat_key}"
+
+    try:
+        db_chat_channel = await DBChatChannel.get_channel(chat_key=target_chat_key)
+        effective_config = await db_chat_channel.get_effective_config()
+
+        if effective_config.AI_CHAT_DAILY_REPLY_LIMIT <= 0:
+            await finish_with(matcher, message=f"频道 {target_chat_key} 未配置每日限额，无法启用每小时配额")
+
+        # 更新配置
+        enable = action == "enable"
+        UnifiedConfigService.set_config_value(config_key, "AI_CHAT_HOURLY_QUOTA_ENABLED", "true" if enable else "false")
+        UnifiedConfigService.save_config(config_key)
+
+        # 清除缓存的 effective_config
+        db_chat_channel._effective_config = None  # noqa: SLF001
+    except Exception as e:
+        await finish_with(matcher, message=f"操作失败: {e}")
+
+    if action == "enable":
+        hourly_limit = quota_service.calculate_hourly_quota(effective_config.AI_CHAT_DAILY_REPLY_LIMIT)
+        await finish_with(
+            matcher,
+            message=f"已为频道 {target_chat_key} 启用每小时配额\n"
+            f"每小时限额: {hourly_limit}\n"
+            f"(基于每日限额 {effective_config.AI_CHAT_DAILY_REPLY_LIMIT} 计算得出)",
+        )
+    else:
+        await finish_with(matcher, message=f"已为频道 {target_chat_key} 禁用每小时配额")
+
+
+
 async def _(matcher: Matcher, event: MessageEvent, bot: Bot, arg: Message = CommandArg()):
     """查看配额白名单用户列表"""
     username, cmd_content, chat_key, chat_type = await command_guard(event, bot, arg, matcher)

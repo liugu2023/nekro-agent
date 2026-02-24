@@ -697,6 +697,22 @@ class CoreConfig(ConfigBase):
             ),
         ).model_dump(),
     )
+    AI_CHAT_HOURLY_QUOTA_ENABLED: bool = Field(
+        default=False,
+        title="启用每小时配额",
+        description="是否启用每小时配额限制。启用后，将根据每日上限自动计算每小时限额（每日限额/24）",
+        json_schema_extra=ExtraField(
+            overridable=True,
+            i18n_title=i18n_text(
+                zh_CN="启用每小时配额",
+                en_US="Enable Hourly Quota",
+            ),
+            i18n_description=i18n_text(
+                zh_CN="启用后，根据每日上限自动计算每小时限额（每日限额/24）",
+                en_US="When enabled, hourly quota will be calculated automatically based on daily limit (daily limit / 24)",
+            ),
+        ).model_dump(),
+    )
     AI_CHAT_DAILY_REPLY_WHITELIST_USERS: List[str] = Field(
         default_factory=list,
         title="配额白名单用户",
