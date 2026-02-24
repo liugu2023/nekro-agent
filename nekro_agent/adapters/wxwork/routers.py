@@ -5,7 +5,9 @@
 实现 URL 验证和消息接收的 webhook 接口
 """
 
+import json
 import urllib.parse
+import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING, Optional
 
 from fastapi import APIRouter, Query, Request
@@ -156,7 +158,7 @@ async def receive_message(
         # 对于自建应用，receive_id 是 corp_id
         receive_id = _adapter.config.CORP_ID if _adapter.config.CORP_ID else ""
 
-        message_data = _adapter.crypto.decrypt_message(
+        decrypted_text = _adapter.crypto.decrypt_message(
             msg_signature=msg_signature,
             timestamp=timestamp,
             nonce=nonce,
@@ -165,12 +167,70 @@ async def receive_message(
         )
 
         logger.info("成功解密企业微信消息")
-        logger.debug(f"消息内容: {json.dumps(message_data, ensure_ascii=False, indent=2)}")
+        logger.info(f"解密原始内容:\n{decrypted_text}")
+        logger.debug(f"解密内容: {decrypted_text[:200]}")
 
-        # 4. 处理消息（异步，不阻塞响应）
-        import asyncio
+        # 4. 解析消息（XML 或 JSON 格式）
+        message_data = {}
+        try:
+            if decrypted_text.strip().startswith("<"):
+                # XML 格式（企业自建应用）
+                root = ET.fromstring(decrypted_text)
+                for child in root:
+                    # 获取标签值，处理 CDATA 和普通文本
+                    text_value = child.text
+                    message_data[child.tag] = text_value
+                    logger.debug(f"XML 字段: {child.tag}={text_value}")
+                logger.info(f"解析 XML 消息完成，字段数: {len(message_data)}")
+                logger.debug(f"完整解析结果: {json.dumps(message_data, ensure_ascii=False, indent=2)}")
+            else:
+                # JSON 格式
+                message_data = json.loads(decrypted_text)
+                logger.debug(f"解析 JSON 消息: {json.dumps(message_data, ensure_ascii=False, indent=2)}")
+        except (ET.ParseError, json.JSONDecodeError) as e:
+            logger.error(f"解析消息失败: {e}")
+            return Response(content="", status_code=200)
 
-        asyncio.create_task(_adapter.message_processor.process_message(message_data))
+        # 5. 检查是否是客服事件，如果是则拉取消息
+        if message_data.get("MsgType") == "event" and message_data.get("Event") == "kf_msg_or_event":
+            logger.info("收到企业微信客服消息事件，准备拉取消息")
+
+            token = message_data.get("Token", "")
+            open_kfid = message_data.get("OpenKfId", "")
+
+            if not token or not open_kfid:
+                logger.error("客服事件缺少 Token 或 OpenKfId")
+                return Response(content="", status_code=200)
+
+            # 拉取客服消息
+            try:
+                sync_result = await _adapter.api_client.sync_msg(
+                    token=token,
+                    open_kfid=open_kfid,
+                )
+
+                if not sync_result:
+                    logger.warning("拉取客服消息失败")
+                    return Response(content="", status_code=200)
+
+                msg_list = sync_result.get("msg_list", [])
+                logger.info(f"成功拉取 {len(msg_list)} 条客服消息")
+
+                # 异步处理每条消息
+                import asyncio
+
+                for msg in msg_list:
+                    asyncio.create_task(_adapter.message_processor.process_kf_message(msg, open_kfid))
+
+            except Exception as e:
+                logger.error(f"处理客服消息异常: {e}")
+                return Response(content="", status_code=200)
+        else:
+            # 普通自建应用消息，直接处理
+            # 4. 处理消息（异步，不阻塞响应）
+            import asyncio
+
+            asyncio.create_task(_adapter.message_processor.process_message(message_data))
 
         # 5. 返回空包表示接收成功
         return Response(content="", status_code=200)

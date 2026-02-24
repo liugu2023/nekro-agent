@@ -279,6 +279,59 @@ class WxWorkApiClient:
             logger.error(f"获取用户信息异常: {e}")
             return None
 
+    async def sync_msg(
+        self,
+        token: str,
+        open_kfid: str,
+        cursor: str = "",
+        limit: int = 1000,
+    ) -> Optional[Dict[str, Any]]:
+        """拉取企业微信客服消息
+
+        Args:
+            token: 企业微信回调事件返回的 token（10分钟内有效）
+            open_kfid: 客服账号 ID
+            cursor: 上一次调用时返回的 next_cursor，第一次拉取可以不填
+            limit: 期望请求的数据量，默认值和最大值都为 1000
+
+        Returns:
+            dict: 包含 msg_list、next_cursor、has_more 等信息，失败返回 None
+        """
+        try:
+            access_token = await self.get_access_token()
+
+            payload = {
+                "cursor": cursor,
+                "token": token,
+                "limit": limit,
+                "voice_format": 0,
+                "open_kfid": open_kfid,
+            }
+
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.BASE_URL}/kf/sync_msg",
+                    params={"access_token": access_token},
+                    json=payload,
+                    timeout=30.0,
+                )
+                response.raise_for_status()
+
+            data = response.json()
+            if data.get("errcode") != 0:
+                logger.error(f"拉取客服消息失败: {data.get('errmsg')}")
+                return None
+
+            return {
+                "msg_list": data.get("msg_list", []),
+                "next_cursor": data.get("next_cursor", ""),
+                "has_more": data.get("has_more", 0),
+            }
+
+        except Exception as e:
+            logger.error(f"拉取客服消息异常: {e}")
+            return None
+
     async def _send_message(
         self,
         message: dict,

@@ -55,7 +55,7 @@ class WxWorkBotCrypt:
         # 2. 解密 echostr，获取其中的 msg 字段
         return self._decrypt(echostr, receive_id=receive_id)
 
-    def decrypt_message(self, msg_signature: str, timestamp: str, nonce: str, encrypt_data: str, receive_id: str = "") -> dict:
+    def decrypt_message(self, msg_signature: str, timestamp: str, nonce: str, encrypt_data: str, receive_id: str = "") -> str:
         """解密消息（POST 请求）
 
         Args:
@@ -66,7 +66,7 @@ class WxWorkBotCrypt:
             receive_id: 接收者 ID（自建应用传 corp_id，智能机器人传空字符串）
 
         Returns:
-            解密后的消息 JSON 对象
+            解密后的消息原始文本（可能是 JSON 或 XML 格式）
 
         Raises:
             ValueError: 签名验证失败或解密失败
@@ -76,15 +76,8 @@ class WxWorkBotCrypt:
         if signature != msg_signature:
             raise ValueError(f"签名验证失败: {signature} != {msg_signature}")
 
-        # 2. 解密消息
-        decrypted_text = self._decrypt(encrypt_data, receive_id=receive_id)
-
-        # 3. 解析 JSON
-        try:
-            return json.loads(decrypted_text)
-        except json.JSONDecodeError as e:
-            logger.exception(f"解析解密后的消息 JSON 失败: {e}")
-            raise ValueError(f"消息不是有效的 JSON 格式: {decrypted_text[:200]}") from e
+        # 2. 解密消息并返回原始文本（调用方自己决定如何解析）
+        return self._decrypt(encrypt_data, receive_id=receive_id)
 
     def encrypt_message(self, reply_data: dict, nonce: str, timestamp: str, receive_id: str = "") -> dict:
         """加密消息用于回复（POST 响应）
