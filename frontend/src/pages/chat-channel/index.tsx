@@ -129,10 +129,10 @@ export default function ChatChannelPage() {
               const channel = { ...newItems[idx] }
               newItems.splice(idx, 1)
 
-              if (newChannelName !== undefined) {
+              if (newChannelName != null) {
                 channel.channel_name = newChannelName
               }
-              if (newIsActive !== undefined) {
+              if (newIsActive != null) {
                 channel.is_active = newIsActive
               }
               channel.update_time = new Date().toISOString()
