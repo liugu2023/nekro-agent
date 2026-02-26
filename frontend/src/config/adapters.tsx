@@ -416,48 +416,6 @@ export const ADAPTER_CONFIGS: Record<string, AdapterConfig> = {
     ],
   },
 
-  // 企业微信自建应用适配器配置
-  wxwork: {
-    key: 'wxwork',
-    visual: {
-      displayName: 'names.wxwork',
-      iconText: '企微',
-      navIcon: <ChatIcon />,
-      description: '企业微信自建应用适配器，支持消息接收和主动发送',
-      tags: ['企业微信', 'WeWork', '自建应用', 'IM'],
-    },
-    tabs: [
-      {
-        label: 'tabs.home',
-        value: 'home',
-        icon: <HomeIcon fontSize="small" />,
-        path: '',
-        component: <AdapterHomePage />,
-      },
-      {
-        label: 'tabs.config',
-        value: 'config',
-        icon: <SettingsIcon fontSize="small" />,
-        path: 'config',
-        component: <AdapterConfigPage />,
-      },
-      {
-        label: 'tabs.overrides',
-        value: 'overrides',
-        icon: <StyleIcon fontSize="small" />,
-        path: 'overrides',
-        component: <AdapterOverrideConfigPage />,
-      },
-      {
-        label: 'tabs.advanced',
-        value: 'advanced',
-        icon: <EngineeringIcon fontSize="small" />,
-        path: 'advanced',
-        component: <AdapterAdvancedPage />,
-      },
-    ],
-  },
-
   // 默认适配器配置（用于其他适配器）
   default: {
     key: 'default',

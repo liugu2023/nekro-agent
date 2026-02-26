@@ -31,8 +31,7 @@
     "sse": "SSE",
     "wechatpad": "WeChatPad",
     "telegram": "Telegram",
-    "email": "Email",
-    "wxwork": "WeWork"
+    "email": "Email"
   },
   "status": {
     "loaded": "Loaded",

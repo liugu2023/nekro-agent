@@ -31,8 +31,7 @@
     "sse": "SSE",
     "wechatpad": "WeChatPad",
     "telegram": "Telegram",
-    "email": "Email",
-    "wxwork": "企业微信"
+    "email": "Email"
   },
   "status": {
     "loaded": "已加载",

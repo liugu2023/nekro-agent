@@ -18,7 +18,6 @@ ADAPTER_DICT: Dict[str, str] = {
     "wechatpad": "nekro_agent.adapters.wechatpad.adapter.WeChatPadAdapter",
     "telegram": "nekro_agent.adapters.telegram.adapter.TelegramAdapter",
     "email": "nekro_agent.adapters.email.adapter.EmailAdapter",
-    "wxwork": "nekro_agent.adapters.wxwork.adapter.WxWorkAdapter",
 }
 
 loaded_adapters: Dict[str, BaseAdapter] = {}
