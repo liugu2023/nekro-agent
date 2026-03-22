@@ -101,6 +101,14 @@ ADAPTER_REGISTRY: Dict[str, AdapterSpec] = {
         description="飞书适配器",
         tags=("feishu",),
     ),
+    "wechat_openclaw": AdapterSpec(
+        key="wechat_openclaw",
+        adapter_path="nekro_agent.adapters.wechat_openclaw.adapter.WeChatOpenClawAdapter",
+        config_path="nekro_agent.adapters.wechat_openclaw.config.WeChatOpenClawConfig",
+        name="WeChat OpenClaw",
+        description="基于 iLink Bot API 的微信适配器",
+        tags=("wechat", "openclaw", "ilink"),
+    ),
 }
 
 ADAPTER_DICT: Dict[str, str] = {key: spec.adapter_path for key, spec in ADAPTER_REGISTRY.items()}

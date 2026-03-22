@@ -20,6 +20,7 @@
     "overrides": "覆盖配置",
     "advanced": "高级",
     "logs": "容器日志",
+    "login": "扫码登录",
     "napcat": "NapCat"
   },
   "names": {
@@ -33,6 +34,7 @@
     "telegram": "Telegram",
     "email": "Email",
     "feishu": "飞书",
+    "wechat_openclaw": "微信 OpenClaw",
     "wxwork": "WeWork Bot"
   },
   "status": {

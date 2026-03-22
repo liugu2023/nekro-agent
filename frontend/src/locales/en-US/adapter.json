@@ -20,6 +20,7 @@
     "overrides": "Overrides",
     "advanced": "Advanced",
     "logs": "Container Logs",
+    "login": "QR Login",
     "napcat": "NapCat"
   },
   "names": {
@@ -33,6 +34,7 @@
     "telegram": "Telegram",
     "email": "Email",
     "feishu": "Feishu",
+    "wechat_openclaw": "WeChat OpenClaw",
     "wxwork": "WeWork Bot"
   },
   "status": {

@@ -17,6 +17,7 @@ import {
   Chat as ChatIcon,
   Send as SendIcon,
   Email as EmailIcon,
+  QrCode2 as QrCodeIcon,
 } from '@mui/icons-material'
 import i18next from './i18n'
 import { ReactElement } from 'react'
@@ -30,6 +31,7 @@ import AdapterAdvancedPage from '../pages/adapter/AdapterAdvancedPage'
 import AdapterOverrideConfigPage from '../pages/adapter/AdapterOverrideConfigPage'
 import OneBotV11NapCatPage from '../pages/adapter/onebot_v11/napcat'
 import OneBotV11LogsPage from '../pages/adapter/onebot_v11/logs'
+import WeChatOpenClawLoginPage from '../pages/adapter/wechat_openclaw/login'
 
 export interface AdapterTabConfig {
   label: string
@@ -501,6 +503,55 @@ export const ADAPTER_CONFIGS: Record<string, AdapterConfig> = {
   //     },
   //   ],
   // },
+
+  // WeChat OpenClaw 适配器配置
+  wechat_openclaw: {
+    key: 'wechat_openclaw',
+    visual: {
+      displayName: 'names.wechat_openclaw',
+      iconText: '微信',
+      navIcon: <ChatIcon />,
+      description: '基于 iLink Bot API 的微信适配器（通过 OpenClaw 代理服务）',
+      tags: ['微信', 'WeChat', 'OpenClaw', 'iLink'],
+    },
+    tabs: [
+      {
+        label: 'tabs.home',
+        value: 'home',
+        icon: <HomeIcon fontSize="small" />,
+        path: '',
+        component: <AdapterHomePage />,
+      },
+      {
+        label: 'tabs.login',
+        value: 'login',
+        icon: <QrCodeIcon fontSize="small" />,
+        path: 'login',
+        component: <WeChatOpenClawLoginPage />,
+      },
+      {
+        label: 'tabs.config',
+        value: 'config',
+        icon: <SettingsIcon fontSize="small" />,
+        path: 'config',
+        component: <AdapterConfigPage />,
+      },
+      {
+        label: 'tabs.overrides',
+        value: 'overrides',
+        icon: <StyleIcon fontSize="small" />,
+        path: 'overrides',
+        component: <AdapterOverrideConfigPage />,
+      },
+      {
+        label: 'tabs.advanced',
+        value: 'advanced',
+        icon: <EngineeringIcon fontSize="small" />,
+        path: 'advanced',
+        component: <AdapterAdvancedPage />,
+      },
+    ],
+  },
 
   // 默认适配器配置（用于其他适配器）
   default: {
