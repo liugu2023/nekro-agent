@@ -37,6 +37,7 @@ from .events import router as events_router
 from .kb_library import router as kb_library_router
 from .logs import router as logs_router
 from .mcp import router as mcp_router
+from .plugin_dev import router as plugin_dev_router
 from .plugin_editor import router as plugin_editor_router
 from .plugins import router as plugins_router
 from .presets import router as presets_router
@@ -75,6 +76,7 @@ def mount_middlewares(app: FastAPI):
         - 普通请求记录的是完整处理耗时
         - 流式响应记录的是开始返回响应前的耗时，不包含整个流结束时间
         """
+
         def get_elapsed_color(elapsed_ms: float) -> str:
             if elapsed_ms >= 3000:
                 return "red"
@@ -131,6 +133,7 @@ def mount_api_routes(app: FastAPI):
     api.include_router(config_router)
     api.include_router(plugins_router)
     api.include_router(plugin_editor_router)
+    api.include_router(plugin_dev_router)
     api.include_router(sandbox_router)
     api.include_router(dashboard_router)
     api.include_router(chat_channel_router)

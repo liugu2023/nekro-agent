@@ -117,6 +117,10 @@ const router = createHashRouter([
             path: 'editor',
             element: lazyLoad(() => import('../pages/plugins/editor')),
           },
+          {
+            path: 'cc-editor',
+            element: lazyLoad(() => import('../pages/plugins/cc-editor')),
+          },
         ],
       },
       {
