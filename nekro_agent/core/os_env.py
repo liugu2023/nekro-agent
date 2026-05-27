@@ -44,6 +44,7 @@ class OsEnv:
 
     """其他配置"""
     RUN_IN_DOCKER: bool = OsEnvTypes.Bool("RUN_IN_DOCKER")
+    CLI_MODE: bool = OsEnvTypes.Bool("CLI_MODE")
 
     """暴露端口"""
     EXPOSE_PORT: int = OsEnvTypes.Int("EXPOSE_PORT", default=8021)

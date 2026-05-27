@@ -162,7 +162,7 @@ async def apply_plugin_dev_proposal(
     proposal_id: str,
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevApplyResponse:
-    version_id = apply_proposal(proposal_id)
+    version_id = await apply_proposal(proposal_id)
     return PluginDevApplyResponse(version_id=version_id)
 
 

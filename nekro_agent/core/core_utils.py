@@ -16,7 +16,10 @@ from typing import (
 )
 from urllib.parse import quote_plus
 
-import nonebot
+try:
+    import nonebot
+except ModuleNotFoundError:
+    nonebot = None
 import yaml
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field, PrivateAttr
@@ -334,7 +337,7 @@ class ConfigBase(BaseModel):
                 )
 
             # 2. 处理 nonebot 环境变量
-            if load_to_nonebot_env:
+            if load_to_nonebot_env and nonebot is not None:
                 try:
                     driver = nonebot.get_driver()
 

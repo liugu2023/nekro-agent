@@ -8,11 +8,13 @@ from pathlib import Path
 from typing import Any
 
 from nekro_agent.schemas.errors import NotFoundError, ValidationError
+from nekro_agent.schemas.plugin_check import PluginCheckReport
 from nekro_agent.schemas.plugin_dev import PluginDevGenerateRequest, PluginDevProposalResponse, PluginDevTaskResponse
 from nekro_agent.services.plugin.generator import _clean_code_format
 from nekro_agent.services.plugin_dev.host_file_gateway import read_plugin_file, resolve_plugin_file, write_plugin_file
 from nekro_agent.services.plugin_dev.paths import PLUGIN_DEV_PROPOSAL_DIR, PLUGIN_DEV_TASK_DIR
 from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
+from nekro_agent.services.plugin_dev.self_check import run_plugin_self_check, summarize_plugin_check
 from nekro_agent.services.plugin_dev.versioning import get_version_info, record_version, utc_now_iso
 
 _TASK_HANDLES: dict[str, asyncio.Task[None]] = {}
@@ -73,6 +75,55 @@ def _extract_python_code(text: str) -> str:
     return _clean_code_format(candidates[-1] if candidates else text)
 
 
+def _append_plugin_check_logs(logs: list[str], report: PluginCheckReport, *, prefix: str) -> None:
+    plugin_label = report.plugin.key if report.plugin else report.candidate_path
+    logs.append(f"{prefix}结果：{'通过' if report.ok else '失败'} ({plugin_label})")
+    for warning in report.warnings[:3]:
+        logs.append(f"{prefix}警告：{warning}")
+    for check in report.checks:
+        if not check.ok:
+            detail = check.error or check.detail or check.title
+            logs.append(f"{prefix}失败：{check.title} - {detail}")
+            break
+
+
+def _build_plugin_dev_instruction(
+    body: PluginDevGenerateRequest,
+    current_code: str,
+    sandbox_candidate_path: str,
+    self_check_command: str,
+) -> str:
+    version_info = get_version_info().model_dump_json()
+    return "\n".join(
+        [
+            "请根据用户需求修改 NekroAgent 插件代码，并输出完整可运行的单文件插件代码。",
+            "在输出插件代码前，必须先参考 /workspace/nekro-agent-source 的当前源码，优先检查插件基类、配置、事件、方法挂载和已有插件示例。",
+            "所有 import 路径、类名、函数名、装饰器和枚举必须能在该源码中找到真实定义，不允许凭记忆编造 nekro_agent.*、plugins.* 或其他内部包路径。",
+            "如果无法在源码中确认某个导入，必须改用源码中已存在的 API 或说明无法确认，不能输出会导入失败的代码。",
+            "不要修改 /workspace/nekro-agent-source；如果参考源码不可用，需在说明中明确指出。",
+            "必须以当前插件开发版本信息中的 nekro_agent_release/source_resolved_commit 对应源码为准，不要假设 GitHub main、latest 或其他版本代表当前运行环境。",
+            "任务已提供一个可写的插件工作副本路径。请先把候选代码写入该工作副本，再运行提供的插件自检命令。",
+            "若插件自检失败，必须继续修复直到通过；若因环境缺少依赖无法执行自检，必须在最终说明中明确指出。",
+            "不要省略 import、配置类、插件实例或已有逻辑。",
+            "如果无法完成，也要返回最接近可运行的完整代码并在代码注释外避免解释文本。",
+            "",
+            "用户需求：",
+            body.prompt,
+            "",
+            f"目标文件：{body.file_path}",
+            f"当前工作副本路径：{sandbox_candidate_path}",
+            f"插件自检命令：{self_check_command}",
+            "",
+            "当前代码快照：",
+            "```python",
+            current_code,
+            "```",
+            "",
+            f"当前插件开发版本信息：{version_info}",
+        ]
+    )
+
+
 def _task_response(data: dict[str, Any]) -> PluginDevTaskResponse:
     return PluginDevTaskResponse(
         task_id=str(data["task_id"]),
@@ -124,25 +175,21 @@ async def _run_task(task_id: str, body: PluginDevGenerateRequest, summary: str) 
     task_data = _read_json(_task_path(task_id), {})
     try:
         current_code = body.current_code
-        instruction = (
-            "请根据用户需求修改 NekroAgent 插件代码，并输出完整可运行的单文件插件代码。"
-            "在输出插件代码前，必须先参考 /workspace/nekro-agent-source 的当前源码，"
-            "优先检查插件基类、配置、事件、方法挂载和已有插件示例。"
-            "所有 import 路径、类名、函数名、装饰器和枚举必须能在该源码中找到真实定义；"
-            "不允许凭记忆编造 nekro_agent.*、plugins.* 或其他内部包路径。"
-            "如果无法在源码中确认某个导入，必须改用源码中已存在的 API 或说明无法确认，不能输出会导入失败的代码。"
-            "不要修改 /workspace/nekro-agent-source；如果参考源码不可用，需在说明中明确指出。"
-            "必须以当前插件开发版本信息中的 nekro_agent_release/source_resolved_commit 对应源码为准，"
-            "不要假设 GitHub main、latest 或其他版本代表当前运行环境。"
-            "不要省略 import、配置类、插件实例或已有逻辑。"
-            "如果无法完成，也要返回最接近可运行的完整代码并在代码注释外避免解释文本。\n\n"
-            f"用户需求：\n{body.prompt}\n\n"
-            f"目标文件：{body.file_path}\n"
-            f"当前插件开发版本信息：{get_version_info().model_dump_json()}"
+        sandbox_candidate_path = PluginDevSandboxService.prepare_task_workspace(body.file_path, current_code)
+        self_check_command = (
+            f"python /workspace/nekro-agent-source/run_nekro_cli.py plugin check {sandbox_candidate_path} --json"
+        )
+        instruction = _build_plugin_dev_instruction(
+            body,
+            current_code,
+            sandbox_candidate_path,
+            self_check_command,
         )
         task_data["logs"].append("已注入插件开发版本信息")
         task_data["logs"].append("准备 Nekro Agent 参考源码")
         task_data["logs"].append("参考源码路径：/workspace/nekro-agent-source")
+        task_data["logs"].append(f"已同步插件工作副本：{sandbox_candidate_path}")
+        task_data["logs"].append(f"已提供自检命令：{self_check_command}")
         task_data["logs"].append("正在启动插件开发专用 Claude Code 沙盒")
         task_data["status"] = "running_cc"
         _write_json(_task_path(task_id), task_data)
@@ -165,7 +212,15 @@ async def _run_task(task_id: str, body: PluginDevGenerateRequest, summary: str) 
             raise ValidationError(reason="生成结果为空")
 
         task_data["status"] = "creating_proposal"
-        task_data["logs"].append("CC 已返回结果，正在生成 diff 提案")
+        task_data["logs"].append("CC 已返回结果，正在执行宿主机插件自检")
+        _write_json(_task_path(task_id), task_data)
+
+        check_report = await run_plugin_self_check(body.file_path, result_code, level="smoke")
+        _append_plugin_check_logs(task_data["logs"], check_report, prefix="宿主机自检")
+        if not check_report.ok:
+            raise ValidationError(reason=f"插件自检未通过: {summarize_plugin_check(check_report)}")
+
+        task_data["logs"].append("宿主机插件自检通过，正在生成 diff 提案")
         _write_json(_task_path(task_id), task_data)
 
         proposal = create_proposal(
@@ -226,7 +281,7 @@ async def create_task(body: PluginDevGenerateRequest) -> PluginDevTaskResponse:
     return _task_response(task_data)
 
 
-def apply_proposal(proposal_id: str) -> str:
+async def apply_proposal(proposal_id: str) -> str:
     proposal = get_proposal(proposal_id)
     if proposal.status != "pending":
         raise ValidationError(reason="该提案已处理")
@@ -235,6 +290,11 @@ def apply_proposal(proposal_id: str) -> str:
         before = read_plugin_file(proposal.file_path)
     except Exception:
         before = ""
+
+    check_report = await run_plugin_self_check(proposal.file_path, proposal.result_code, level="smoke")
+    if not check_report.ok:
+        raise ValidationError(reason=f"插件自检未通过: {summarize_plugin_check(check_report)}")
+
     write_plugin_file(proposal.file_path, proposal.result_code)
     version_id = record_version(
         file_path=proposal.file_path,
