@@ -1,28 +1,33 @@
-from .db_adapter_instance import DBAdapterInstance  # noqa: F401
-from .db_adapter_instance_event import DBAdapterInstanceEvent  # noqa: F401
-from .db_adapter_instance_session import DBAdapterInstanceSession  # noqa: F401
-from .db_chat_channel import DBChatChannel  # noqa: F401
-from .db_chat_message import DBChatMessage  # noqa: F401
-from .db_email import DBEmail  # noqa: F401
-from .db_exec_code import DBExecCode  # noqa: F401
-from .db_kb_asset import DBKBAsset  # noqa: F401
-from .db_kb_asset_binding import DBKBAssetBinding  # noqa: F401
-from .db_kb_asset_chunk import DBKBAssetChunk  # noqa: F401
-from .db_kb_asset_reference import DBKBAssetReference  # noqa: F401
-from .db_kb_chunk import DBKBChunk  # noqa: F401
-from .db_kb_document import DBKBDocument  # noqa: F401
-from .db_kb_document_reference import DBKBDocumentReference  # noqa: F401
-from .db_mem_entity import DBMemEntity  # noqa: F401
-from .db_mem_episode import DBMemEpisode  # noqa: F401
-from .db_mem_media_resource import DBMemMediaResource  # noqa: F401
-from .db_mem_paragraph import DBMemParagraph  # noqa: F401
-from .db_mem_reinforcement_log import DBMemReinforcementLog  # noqa: F401
-from .db_mem_relation import DBMemRelation  # noqa: F401
-from .db_plugin_data import DBPluginData  # noqa: F401
-from .db_preset import DBPreset  # noqa: F401
-from .db_recurring_timer_job import DBRecurringTimerJob  # noqa: F401
-from .db_user import DBUser  # noqa: F401
-from .db_workspace import DBWorkspace  # noqa: F401
-from .db_workspace_comm_log import DBWorkspaceCommLog  # noqa: F401
-from .db_workspace_resource import DBWorkspaceResource  # noqa: F401
-from .db_workspace_resource_binding import DBWorkspaceResourceBinding  # noqa: F401
+from nekro_agent.core.os_env import OsEnv
+
+if OsEnv.CLI_MODE:
+    from .db_plugin_data import DBPluginData  # noqa: F401
+else:
+    from .db_adapter_instance import DBAdapterInstance  # noqa: F401
+    from .db_adapter_instance_event import DBAdapterInstanceEvent  # noqa: F401
+    from .db_adapter_instance_session import DBAdapterInstanceSession  # noqa: F401
+    from .db_chat_channel import DBChatChannel  # noqa: F401
+    from .db_chat_message import DBChatMessage  # noqa: F401
+    from .db_email import DBEmail  # noqa: F401
+    from .db_exec_code import DBExecCode  # noqa: F401
+    from .db_kb_asset import DBKBAsset  # noqa: F401
+    from .db_kb_asset_binding import DBKBAssetBinding  # noqa: F401
+    from .db_kb_asset_chunk import DBKBAssetChunk  # noqa: F401
+    from .db_kb_asset_reference import DBKBAssetReference  # noqa: F401
+    from .db_kb_chunk import DBKBChunk  # noqa: F401
+    from .db_kb_document import DBKBDocument  # noqa: F401
+    from .db_kb_document_reference import DBKBDocumentReference  # noqa: F401
+    from .db_mem_entity import DBMemEntity  # noqa: F401
+    from .db_mem_episode import DBMemEpisode  # noqa: F401
+    from .db_mem_media_resource import DBMemMediaResource  # noqa: F401
+    from .db_mem_paragraph import DBMemParagraph  # noqa: F401
+    from .db_mem_reinforcement_log import DBMemReinforcementLog  # noqa: F401
+    from .db_mem_relation import DBMemRelation  # noqa: F401
+    from .db_plugin_data import DBPluginData  # noqa: F401
+    from .db_preset import DBPreset  # noqa: F401
+    from .db_recurring_timer_job import DBRecurringTimerJob  # noqa: F401
+    from .db_user import DBUser  # noqa: F401
+    from .db_workspace import DBWorkspace  # noqa: F401
+    from .db_workspace_comm_log import DBWorkspaceCommLog  # noqa: F401
+    from .db_workspace_resource import DBWorkspaceResource  # noqa: F401
+    from .db_workspace_resource_binding import DBWorkspaceResourceBinding  # noqa: F401

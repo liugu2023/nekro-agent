@@ -1,17 +1,19 @@
+from __future__ import annotations
+
 from enum import Enum
 from time import time
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from nekro_agent.models.db_chat_channel import DBChatChannel, DefaultPreset
-from nekro_agent.models.db_preset import DBPreset
 from nekro_agent.schemas.chat_message import ChatMessageSegment, ChatType
 
 from .extra import PlatformMessageExt
 
 if TYPE_CHECKING:
     from nekro_agent.adapters.interface.base import BaseAdapter
+    from nekro_agent.models.db_chat_channel import DBChatChannel, DefaultPreset
+    from nekro_agent.models.db_preset import DBPreset
 
 
 class PlatformUser(BaseModel):
@@ -27,7 +29,9 @@ class PlatformChannel(BaseModel):
     channel_type: ChatType = Field(default=ChatType.UNKNOWN, description="频道类型")
     channel_avatar: str = Field(default="", description="频道头像")
 
-    async def get_db_chat_channel(self, adapter: "BaseAdapter") -> DBChatChannel:
+    async def get_db_chat_channel(self, adapter: BaseAdapter) -> DBChatChannel:
+        from nekro_agent.models.db_chat_channel import DBChatChannel
+
         return await DBChatChannel.get_or_create(
             adapter_key=adapter.key,
             channel_id=self.channel_id,
@@ -35,7 +39,7 @@ class PlatformChannel(BaseModel):
             channel_name=self.channel_name,
         )
 
-    async def get_preset(self, adapter: "BaseAdapter") -> Union[DBPreset, DefaultPreset]:
+    async def get_preset(self, adapter: BaseAdapter) -> Union[DBPreset, DefaultPreset]:
         return await (await self.get_db_chat_channel(adapter)).get_preset()
 
 
@@ -53,18 +57,13 @@ class PlatformMessage(BaseModel):
     ext_data: Optional[PlatformMessageExt] = Field(default=PlatformMessageExt(), description="扩展数据")
 
 
-# ========================================================================================
-# |                          协议端消息发送相关数据结构                                      |
-# ========================================================================================
-
-
 class PlatformSendSegmentType(str, Enum):
     """协议端消息段类型"""
 
     TEXT = "text"
     AT = "at"
-    IMAGE = "image"  # 以图片/富文本形式发送
-    FILE = "file"  # 以文件上传形式发送
+    IMAGE = "image"
+    FILE = "file"
 
 
 class PlatformAtSegment(BaseModel):
@@ -75,11 +74,7 @@ class PlatformAtSegment(BaseModel):
 
 
 class PlatformSendSegment(BaseModel):
-    """协议端发送消息段
-
-    这是主程序向协议端传递的标准化消息段结构，
-    协议端根据 type 字段决定具体的发送方式
-    """
+    """协议端发送消息段"""
 
     type: PlatformSendSegmentType = Field(..., description="消息段类型")
     content: str = Field(default="", description="消息内容")
@@ -91,13 +86,7 @@ class PlatformSendSegment(BaseModel):
 
 
 class PlatformSendRequest(BaseModel):
-    """协议端发送请求
-
-    协议端根据 segments 中每个消息段的 type 来决定具体的发送方式：
-    - FILE: 文件上传模式
-    - IMAGE: 图片/富文本模式
-    - TEXT/AT: 普通文本消息
-    """
+    """协议端发送请求"""
 
     chat_key: str = Field(..., description="聊天标识")
     segments: List[PlatformSendSegment] = Field(default=[], description="消息段列表")
