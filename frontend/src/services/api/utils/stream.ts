@@ -69,6 +69,7 @@ export const createEventStream = (options: StreamOptions) => {
         }
       },
       onmessage(ev: EventSourceMessage) {
+        if (!ev.data.trim()) return
         onMessage(ev.data)
       },
       onerror(err: Error) {

@@ -10,7 +10,6 @@ from typing import Any
 from nekro_agent.schemas.errors import NotFoundError, ValidationError
 from nekro_agent.schemas.plugin_check import PluginCheckReport
 from nekro_agent.schemas.plugin_dev import PluginDevGenerateRequest, PluginDevProposalResponse, PluginDevTaskResponse
-from nekro_agent.services.plugin.generator import _clean_code_format
 from nekro_agent.services.plugin_dev.host_file_gateway import read_plugin_file, resolve_plugin_file, write_plugin_file
 from nekro_agent.services.plugin_dev.paths import PLUGIN_DEV_PROPOSAL_DIR, PLUGIN_DEV_TASK_DIR
 from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
@@ -18,6 +17,18 @@ from nekro_agent.services.plugin_dev.self_check import run_plugin_self_check, su
 from nekro_agent.services.plugin_dev.versioning import get_version_info, record_version, utc_now_iso
 
 _TASK_HANDLES: dict[str, asyncio.Task[None]] = {}
+_TASK_QUEUE_LOCK = asyncio.Lock()
+_ACTIVE_TASK_ID: str | None = None
+_MAX_SELF_CHECK_REPAIR_ATTEMPTS = 3
+_REQUIRED_SANDBOX_WRITE_TOOLS = {"write", "edit", "multiedit"}
+_TOOL_PRIMARY_KEYS = ("command", "file_path", "pattern", "url", "query", "prompt", "notebook_path", "path")
+
+
+def get_task_runtime_snapshot() -> tuple[str | None, int]:
+    live_task_ids = [task_id for task_id, handle in _TASK_HANDLES.items() if not handle.done()]
+    active_task_id = _ACTIVE_TASK_ID if _ACTIVE_TASK_ID in live_task_ids else None
+    queue_length = len(live_task_ids) - (1 if active_task_id else 0)
+    return active_task_id, max(queue_length, 0)
 
 
 def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
@@ -60,21 +71,6 @@ def _summary_from_prompt(prompt: str) -> str:
     return f"{normalized[:119]}…"
 
 
-def _extract_python_code(text: str) -> str:
-    marker = "```"
-    if marker not in text:
-        return _clean_code_format(text)
-    blocks = text.split(marker)
-    candidates: list[str] = []
-    for index in range(1, len(blocks), 2):
-        block = blocks[index]
-        if block.lstrip().startswith("python"):
-            candidates.append(block.lstrip()[len("python") :].lstrip("\n"))
-        else:
-            candidates.append(block)
-    return _clean_code_format(candidates[-1] if candidates else text)
-
-
 def _append_plugin_check_logs(logs: list[str], report: PluginCheckReport, *, prefix: str) -> None:
     plugin_label = report.plugin.key if report.plugin else report.candidate_path
     logs.append(f"{prefix}结果：{'通过' if report.ok else '失败'} ({plugin_label})")
@@ -87,7 +83,198 @@ def _append_plugin_check_logs(logs: list[str], report: PluginCheckReport, *, pre
             break
 
 
+def _format_cc_event_log(chunk: dict, tool_names_by_id: dict[str, str]) -> str:
+    chunk_type = str(chunk.get("type") or "tool")
+    name = str(chunk.get("name") or chunk.get("tool_name") or "").strip()
+    tool_use_id = str(chunk.get("tool_use_id") or chunk.get("id") or "").strip()
+    if chunk_type == "tool_call":
+        if tool_use_id and name:
+            tool_names_by_id[tool_use_id] = name
+        payload = _build_tool_call_log_payload(chunk, name=name, tool_use_id=tool_use_id)
+        return f"工具调用：{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
+    if chunk_type == "tool_result":
+        if not name and tool_use_id:
+            name = tool_names_by_id.get(tool_use_id, "")
+        payload = _build_tool_result_log_payload(chunk, name=name, tool_use_id=tool_use_id)
+        return f"工具结果：{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}"
+    return f"CC 事件：{chunk_type}{f' {name}' if name else ''}"
+
+
+def _coerce_tool_payload(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {str(key): payload_value for key, payload_value in value.items()}
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {"value": value}
+        if isinstance(parsed, dict):
+            return {str(key): payload_value for key, payload_value in parsed.items()}
+    return {}
+
+
+def _extract_tool_input(chunk: dict) -> dict[str, Any]:
+    for key in ("input", "arguments", "args", "params"):
+        payload = _coerce_tool_payload(chunk.get(key))
+        if payload:
+            return payload
+
+    ignored_keys = {"type", "name", "tool_name", "tool_use_id", "id", "content", "result", "is_error"}
+    return {key: value for key, value in chunk.items() if key not in ignored_keys}
+
+
+def _stringify_tool_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _extract_tool_result_content(chunk: dict) -> str:
+    for key in ("content", "result", "output", "stdout", "stderr", "message"):
+        if key in chunk:
+            return _stringify_tool_value(chunk.get(key))
+    return ""
+
+
+def _pick_primary_tool_value(payload: dict[str, Any]) -> tuple[str, str]:
+    for key in _TOOL_PRIMARY_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return key, value.strip()
+
+    for key, value in payload.items():
+        if key == "description":
+            continue
+        text = _stringify_tool_value(value).strip()
+        if text:
+            return key, text
+    return "", ""
+
+
+def _build_tool_call_log_payload(chunk: dict, *, name: str, tool_use_id: str) -> dict[str, Any]:
+    tool_input = _extract_tool_input(chunk)
+    primary_key, primary_value = _pick_primary_tool_value(tool_input)
+    description = tool_input.get("description")
+    return {
+        "name": name or "unknown",
+        "tool_use_id": tool_use_id,
+        "input": tool_input,
+        "description": description if isinstance(description, str) else "",
+        "primary_key": primary_key,
+        "primary_value": primary_value,
+    }
+
+
+def _build_tool_result_log_payload(chunk: dict, *, name: str, tool_use_id: str) -> dict[str, Any]:
+    return {
+        "name": name or "unknown",
+        "tool_use_id": tool_use_id,
+        "content": _extract_tool_result_content(chunk),
+        "is_error": bool(chunk.get("is_error")),
+    }
+
+
+def _summarize_cc_response(text: str, *, max_length: int = 500) -> str:
+    normalized = " ".join(text.strip().split())
+    if len(normalized) <= max_length:
+        return normalized
+    return f"{normalized[:max_length]}..."
+
+
+def _detect_cc_model_error(text: str) -> str:
+    normalized = _summarize_cc_response(text, max_length=800)
+    lowered = normalized.lower()
+    if "selected model" in lowered and ("may not exist" in lowered or "access to it" in lowered):
+        return (
+            "CC 模型配置不可用：当前插件开发模型不存在或账号无权限。"
+            f"请在插件开发配置里切换到可用的 CC 模型组。原始返回：{normalized}"
+        )
+    return ""
+
+
+def _validate_sandbox_tools(tools: list[str]) -> None:
+    normalized_tools = {tool.strip().lower() for tool in tools if tool.strip()}
+    if not normalized_tools:
+        raise ValidationError(reason="CC 沙盒没有返回可用工具列表，无法执行插件开发任务")
+    if "bash" not in normalized_tools:
+        raise ValidationError(reason=f"CC 沙盒缺少 Bash 工具，无法运行插件自检。当前工具：{', '.join(tools)}")
+    if normalized_tools.isdisjoint(_REQUIRED_SANDBOX_WRITE_TOOLS):
+        raise ValidationError(reason=f"CC 沙盒缺少 Write/Edit/MultiEdit 工具，无法写入插件工作副本。当前工具：{', '.join(tools)}")
+
+
+def _format_plugin_check_report_for_repair(report: PluginCheckReport) -> str:
+    lines = [
+        f"自检结果：{'通过' if report.ok else '失败'}",
+        f"检查级别：{report.level}",
+        f"候选路径：{report.candidate_path}",
+    ]
+    for check in report.checks:
+        status = "PASS" if check.ok else "FAIL"
+        detail = check.error or check.detail
+        lines.append(f"[{status}] {check.title}{f': {detail}' if detail else ''}")
+    if report.errors:
+        lines.append("错误：")
+        lines.extend(f"- {error}" for error in report.errors[:5])
+    if report.warnings:
+        lines.append("警告：")
+        lines.extend(f"- {warning}" for warning in report.warnings[:5])
+    return "\n".join(lines)
+
+
+def _build_plugin_dev_repair_instruction(
+    *,
+    task_id: str,
+    body: PluginDevGenerateRequest,
+    failed_code: str,
+    sandbox_candidate_path: str,
+    self_check_command: str,
+    failure_report: str,
+    attempt: int,
+) -> str:
+    return "\n".join(
+        [
+            f"第 {attempt - 1} 轮候选插件没有通过宿主机接收条件或自检，请继续修复。",
+            "必须基于下面的失败报告定位问题，把修复后的候选代码写入当前工作副本路径，再运行插件自检命令。",
+            "本轮必须调用沙盒工具执行，至少使用 Write/Edit/MultiEdit 或 Bash 写入当前工作副本；纯文本回复不会被后端接收。",
+            "不要只回复代码块；后端只接收工作副本变更或内部网关 proposal，不会对默认/当前代码快照自检。",
+            "如果使用内部网关创建 proposal，task_id 仍然必须使用当前任务 ID；不要直接写真实插件文件。",
+            "",
+            f"任务 ID：{task_id}",
+            f"目标文件：{body.file_path}",
+            f"当前工作副本路径：{sandbox_candidate_path}",
+            f"插件自检命令：{self_check_command}",
+            "",
+            "宿主机自检失败报告：",
+            failure_report,
+            "",
+            "上一轮候选代码：",
+            "```python",
+            failed_code,
+            "```",
+        ]
+    )
+
+
+def _discard_failed_proposal_for_retry(proposal: PluginDevProposalResponse, *, reason: str) -> None:
+    data = proposal.model_dump()
+    data["status"] = "discarded"
+    data["summary"] = f"{proposal.summary}\n\n自动丢弃：{reason}"
+    _write_json(_proposal_path(proposal.proposal_id), data)
+
+
+def _read_changed_workspace_candidate(candidate_path: Path, rejected_codes: set[str]) -> str | None:
+    if not candidate_path.exists() or not candidate_path.is_file():
+        return None
+    candidate_code = candidate_path.read_text(encoding="utf-8")
+    if candidate_code in rejected_codes:
+        return None
+    return candidate_code
+
+
 def _build_plugin_dev_instruction(
+    task_id: str,
     body: PluginDevGenerateRequest,
     current_code: str,
     sandbox_candidate_path: str,
@@ -96,23 +283,31 @@ def _build_plugin_dev_instruction(
     version_info = get_version_info().model_dump_json()
     return "\n".join(
         [
-            "请根据用户需求修改 NekroAgent 插件代码，并输出完整可运行的单文件插件代码。",
+            "请根据用户需求修改 NekroAgent 插件代码，并交付完整可运行的单文件插件代码。",
             "在输出插件代码前，必须先参考 /workspace/nekro-agent-source 的当前源码，优先检查插件基类、配置、事件、方法挂载和已有插件示例。",
             "所有 import 路径、类名、函数名、装饰器和枚举必须能在该源码中找到真实定义，不允许凭记忆编造 nekro_agent.*、plugins.* 或其他内部包路径。",
             "如果无法在源码中确认某个导入，必须改用源码中已存在的 API 或说明无法确认，不能输出会导入失败的代码。",
             "不要修改 /workspace/nekro-agent-source；如果参考源码不可用，需在说明中明确指出。",
-            "必须以当前插件开发版本信息中的 nekro_agent_release/source_resolved_commit 对应源码为准，不要假设 GitHub main、latest 或其他版本代表当前运行环境。",
-            "任务已提供一个可写的插件工作副本路径。请先把候选代码写入该工作副本，再运行提供的插件自检命令。",
+            "必须以 /workspace/nekro-agent-source 中的本地运行环境快照为准，不要假设 GitHub main、latest 或其他远端版本代表当前运行环境。",
+            "任务已提供一个可写的插件工作副本路径。必须先把候选代码写入该工作副本，再运行提供的插件自检命令。",
             "若插件自检失败，必须继续修复直到通过；若因环境缺少依赖无法执行自检，必须在最终说明中明确指出。",
+            "本任务必须调用沙盒工具执行：先用 Read/Grep/Glob/Bash 查看参考源码或工作副本，再用 Write/Edit/MultiEdit 或 Bash 写入候选代码。",
+            "不要只在最终回复里粘贴代码；后端不会把纯文本回复当作可检查候选，也不会对默认/当前代码快照做自检。",
+            "自检通过后，优先通过内部网关 /proposals 创建写入提案；如果网关不可用，至少确保工作副本路径里的文件已经是最终候选代码。",
             "不要省略 import、配置类、插件实例或已有逻辑。",
-            "如果无法完成，也要返回最接近可运行的完整代码并在代码注释外避免解释文本。",
+            "如果无法完成，也要把最接近可运行的完整代码写入工作副本，并在最终说明中解释原因。",
+            "参考源码默认来自当前 NekroAgent 运行环境的本地快照；以版本信息中的 source_origin/source_dirty/source_resolved_commit 了解来源和可信度。",
             "",
             "用户需求：",
             body.prompt,
             "",
+            f"任务 ID：{task_id}",
             f"目标文件：{body.file_path}",
             f"当前工作副本路径：{sandbox_candidate_path}",
             f"插件自检命令：{self_check_command}",
+            "内部插件文件网关：如需读取真实插件文件或提交写入提案，使用环境变量 NEKRO_PLUGIN_DEV_INTERNAL_API_BASE；请求头 X-Internal-API-Token 使用 INTERNAL_API_TOKEN。",
+            "通过内部网关创建 proposal 时，task_id 必须使用上方任务 ID，content 必须是完整插件文件内容。",
+            "内部网关仅允许获取版本、列出文件、读取文件和创建 proposal，不允许直接写入真实插件文件。",
             "",
             "当前代码快照：",
             "```python",
@@ -153,6 +348,20 @@ def get_proposal(proposal_id: str) -> PluginDevProposalResponse:
     return PluginDevProposalResponse.model_validate(_read_json(path, {}))
 
 
+def get_latest_pending_proposal_for_task(task_id: str) -> PluginDevProposalResponse | None:
+    if not PLUGIN_DEV_PROPOSAL_DIR.exists():
+        return None
+
+    proposals: list[PluginDevProposalResponse] = []
+    for path in PLUGIN_DEV_PROPOSAL_DIR.glob("proposal-*.json"):
+        proposal = PluginDevProposalResponse.model_validate(_read_json(path, {}))
+        if proposal.task_id == task_id and proposal.status == "pending":
+            proposals.append(proposal)
+    if not proposals:
+        return None
+    return max(proposals, key=lambda proposal: (proposal.created_at, proposal.proposal_id))
+
+
 def create_proposal(
     *, task_id: str, file_path: str, before: str, after: str, summary: str
 ) -> PluginDevProposalResponse:
@@ -171,15 +380,17 @@ def create_proposal(
     return proposal
 
 
-async def _run_task(task_id: str, body: PluginDevGenerateRequest, summary: str) -> None:
+async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: str) -> None:
     task_data = _read_json(_task_path(task_id), {})
     try:
         current_code = body.current_code
         sandbox_candidate_path = PluginDevSandboxService.prepare_task_workspace(body.file_path, current_code)
+        sandbox_candidate_host_path = PluginDevSandboxService.resolve_workspace_host_path(sandbox_candidate_path)
         self_check_command = (
             f"python /workspace/nekro-agent-source/run_nekro_cli.py plugin check {sandbox_candidate_path} --json"
         )
         instruction = _build_plugin_dev_instruction(
+            task_id,
             body,
             current_code,
             sandbox_candidate_path,
@@ -194,45 +405,151 @@ async def _run_task(task_id: str, body: PluginDevGenerateRequest, summary: str) 
         task_data["status"] = "running_cc"
         _write_json(_task_path(task_id), task_data)
 
-        full_response = ""
-        async for chunk in PluginDevSandboxService.stream_generate(instruction):
-            if isinstance(chunk, str):
-                full_response += chunk
-                if len(full_response) % 1200 < len(chunk):
-                    task_data["logs"].append(f"CC 已返回约 {len(full_response)} 字符")
-                    _write_json(_task_path(task_id), task_data)
-            elif isinstance(chunk, dict):
-                chunk_type = str(chunk.get("type") or "tool")
-                name = str(chunk.get("name") or chunk.get("tool_name") or "")
-                task_data["logs"].append(f"CC 事件：{chunk_type}{f' {name}' if name else ''}")
-                _write_json(_task_path(task_id), task_data)
-
-        result_code = _extract_python_code(full_response)
-        if not result_code.strip():
-            raise ValidationError(reason="生成结果为空")
-
-        task_data["status"] = "creating_proposal"
-        task_data["logs"].append("CC 已返回结果，正在执行宿主机插件自检")
-        _write_json(_task_path(task_id), task_data)
-
-        check_report = await run_plugin_self_check(body.file_path, result_code, level="smoke")
-        _append_plugin_check_logs(task_data["logs"], check_report, prefix="宿主机自检")
-        if not check_report.ok:
-            raise ValidationError(reason=f"插件自检未通过: {summarize_plugin_check(check_report)}")
-
-        task_data["logs"].append("宿主机插件自检通过，正在生成 diff 提案")
-        _write_json(_task_path(task_id), task_data)
-
-        proposal = create_proposal(
-            task_id=task_id,
-            file_path=body.file_path,
-            before=body.base_code or current_code,
-            after=result_code,
-            summary=summary,
+        sandbox_runtime = await PluginDevSandboxService.inspect_runtime(refresh_tools=True)
+        task_data["logs"].append(
+            "CC 沙盒已启动："
+            f"{sandbox_runtime.container_name or sandbox_runtime.container_id or 'unknown'} "
+            f"({sandbox_runtime.api_endpoint}，健康：{'是' if sandbox_runtime.healthy else '否'})"
         )
+        task_data["logs"].append(
+            "CC 模型组："
+            f"{sandbox_runtime.preset_name or '未命名'}"
+            f"{f' #{sandbox_runtime.preset_id}' if sandbox_runtime.preset_id is not None else ''}"
+            f" · {sandbox_runtime.model_type or 'unknown'} · {sandbox_runtime.model_label or '未配置'}"
+        )
+        if not sandbox_runtime.healthy:
+            raise ValidationError(reason=f"CC 沙盒 API 健康检查失败：{sandbox_runtime.api_endpoint}")
+        _validate_sandbox_tools(sandbox_runtime.tools)
+        preview_tools = ", ".join(sandbox_runtime.tools[:12])
+        extra_count = max(len(sandbox_runtime.tools) - 12, 0)
+        task_data["logs"].append(f"CC 沙盒工具可用：{preview_tools}{f' 等 {extra_count} 个' if extra_count else ''}")
+        _write_json(_task_path(task_id), task_data)
+
+        proposal: PluginDevProposalResponse | None = None
+        result_code = ""
+        next_instruction = instruction
+        last_failure = ""
+        last_checked_code = current_code
+        tool_names_by_id: dict[str, str] = {}
+
+        for attempt in range(1, _MAX_SELF_CHECK_REPAIR_ATTEMPTS + 1):
+            task_data["status"] = "running_cc"
+            task_data["logs"].append(f"CC 第 {attempt} 轮生成/修复开始")
+            _write_json(_task_path(task_id), task_data)
+
+            full_response = ""
+            async for chunk in PluginDevSandboxService.stream_generate(next_instruction):
+                if isinstance(chunk, str):
+                    full_response += chunk
+                    if len(full_response) % 1200 < len(chunk):
+                        task_data["logs"].append(f"CC 已返回约 {len(full_response)} 字符")
+                        _write_json(_task_path(task_id), task_data)
+                elif isinstance(chunk, dict):
+                    task_data["logs"].append(_format_cc_event_log(chunk, tool_names_by_id))
+                    _write_json(_task_path(task_id), task_data)
+
+            candidate_source = ""
+            rejected_codes = {current_code, last_checked_code}
+            proposal = get_latest_pending_proposal_for_task(task_id)
+            if proposal is not None:
+                if proposal.result_code in rejected_codes:
+                    last_failure = "内部网关提案内容与上一轮候选代码一致，未产生新的可检查候选"
+                    _discard_failed_proposal_for_retry(proposal, reason=last_failure)
+                    task_data["logs"].append(f"已丢弃未变化的内部提案：{proposal.proposal_id}")
+                    proposal = None
+                    result_code = ""
+                else:
+                    task_data["logs"].append(f"检测到内部网关写入提案：{proposal.proposal_id}")
+                    task_data["file_path"] = proposal.file_path
+                    result_code = proposal.result_code
+                    candidate_source = "内部网关提案"
+            else:
+                candidate_code = _read_changed_workspace_candidate(sandbox_candidate_host_path, rejected_codes)
+                if candidate_code is None:
+                    result_code = ""
+                else:
+                    result_code = candidate_code
+                    candidate_source = "沙盒工作副本"
+                    task_data["logs"].append(f"检测到 CC 已修改工作副本：{sandbox_candidate_path}")
+
+            if not result_code.strip():
+                model_error = _detect_cc_model_error(full_response)
+                if model_error:
+                    task_data["logs"].append(f"第 {attempt} 轮 CC 运行错误：{model_error}")
+                    raise ValidationError(reason=model_error)
+                last_failure = (
+                    last_failure
+                    or "没有检测到 CC 沙盒提交新的候选代码；未对默认/当前代码执行自检。"
+                    "请使用 Edit/Write 修改工作副本，或调用内部网关 /proposals 提交完整插件内容。"
+                )
+                task_data["logs"].append(f"第 {attempt} 轮未提交可检查候选：{last_failure}")
+                response_summary = _summarize_cc_response(full_response)
+                if response_summary:
+                    task_data["logs"].append(f"第 {attempt} 轮 CC 文本回复摘要：{response_summary}")
+                if attempt >= _MAX_SELF_CHECK_REPAIR_ATTEMPTS:
+                    raise ValidationError(reason=last_failure)
+                next_instruction = _build_plugin_dev_repair_instruction(
+                    task_id=task_id,
+                    body=body,
+                    failed_code=last_checked_code,
+                    sandbox_candidate_path=sandbox_candidate_path,
+                    self_check_command=self_check_command,
+                    failure_report=last_failure,
+                    attempt=attempt + 1,
+                )
+                task_data["logs"].append("已要求 CC 使用沙盒工具提交候选代码")
+                _write_json(_task_path(task_id), task_data)
+                continue
+
+            task_data["status"] = "creating_proposal"
+            task_data["logs"].append(f"第 {attempt} 轮检测到{candidate_source}，正在执行宿主机插件自检")
+            _write_json(_task_path(task_id), task_data)
+
+            check_file_path = proposal.file_path if proposal is not None else body.file_path
+            check_report = await run_plugin_self_check(check_file_path, result_code, level="smoke")
+            _append_plugin_check_logs(task_data["logs"], check_report, prefix=f"第 {attempt} 轮宿主机自检")
+            if check_report.ok:
+                break
+
+            last_checked_code = result_code
+            last_failure = summarize_plugin_check(check_report)
+            if proposal is not None:
+                _discard_failed_proposal_for_retry(proposal, reason=last_failure)
+                task_data["logs"].append(f"已丢弃未通过自检的内部提案：{proposal.proposal_id}")
+                proposal = None
+            if attempt >= _MAX_SELF_CHECK_REPAIR_ATTEMPTS:
+                raise ValidationError(reason=f"插件自检未通过: {last_failure}")
+
+            repair_report = _format_plugin_check_report_for_repair(check_report)
+            next_instruction = _build_plugin_dev_repair_instruction(
+                task_id=task_id,
+                body=body,
+                failed_code=result_code,
+                sandbox_candidate_path=sandbox_candidate_path,
+                self_check_command=self_check_command,
+                failure_report=repair_report,
+                attempt=attempt + 1,
+            )
+            task_data["logs"].append(f"第 {attempt} 轮自检未通过，已将失败报告交回 CC 自动修复")
+            _write_json(_task_path(task_id), task_data)
+        else:
+            raise ValidationError(reason=f"插件自检未通过: {last_failure or '达到最大修复轮次'}")
+
+        task_data["logs"].append("宿主机插件自检通过，正在确认 diff 提案")
+        _write_json(_task_path(task_id), task_data)
+
+        if proposal is None:
+            proposal = create_proposal(
+                task_id=task_id,
+                file_path=body.file_path,
+                before=body.base_code or current_code,
+                after=result_code,
+                summary=summary,
+            )
         task_data.update(
             {
                 "status": "waiting_apply",
+                "file_path": proposal.file_path,
                 "proposal_id": proposal.proposal_id,
                 "diff": proposal.diff,
                 "result_code": result_code,
@@ -252,9 +569,31 @@ async def _run_task(task_id: str, body: PluginDevGenerateRequest, summary: str) 
         task_data["status"] = "failed"
         task_data["error"] = str(e)
         task_data["logs"].append(f"任务失败：{e}")
-    finally:
-        _TASK_HANDLES.pop(task_id, None)
     _write_json(_task_path(task_id), task_data)
+
+
+async def _run_task(task_id: str, body: PluginDevGenerateRequest, summary: str) -> None:
+    global _ACTIVE_TASK_ID
+
+    try:
+        async with _TASK_QUEUE_LOCK:
+            latest_task = _read_json(_task_path(task_id), {})
+            if latest_task.get("status") == "cancelled":
+                return
+            _ACTIVE_TASK_ID = task_id
+            await _execute_task(task_id, body, summary)
+    except asyncio.CancelledError:
+        latest_task = _read_json(_task_path(task_id), {})
+        latest_task["status"] = "cancelled"
+        latest_logs = list(latest_task.get("logs") or [])
+        if not latest_logs or latest_logs[-1] != "任务已取消":
+            latest_logs.append("任务已取消")
+        latest_task["logs"] = latest_logs
+        _write_json(_task_path(task_id), latest_task)
+    finally:
+        if _ACTIVE_TASK_ID == task_id:
+            _ACTIVE_TASK_ID = None
+        _TASK_HANDLES.pop(task_id, None)
 
 
 async def create_task(body: PluginDevGenerateRequest) -> PluginDevTaskResponse:

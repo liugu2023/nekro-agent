@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import inspect
-import sys
 import shutil
+import sys
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,6 +57,20 @@ class CandidateLayout:
     warnings: list[str] = field(default_factory=list)
 
 
+def _is_python_plugin_file(path: Path) -> bool:
+    return path.suffix == ".py" or path.name.endswith(".py.disabled")
+
+
+def _enabled_file_name(path: Path) -> str:
+    if path.name.endswith(".py.disabled"):
+        return path.name[: -len(".disabled")]
+    return path.name
+
+
+def _module_name_from_file(path: Path) -> str:
+    return _enabled_file_name(path).removesuffix(".py")
+
+
 def _add_check(
     report: PluginCheckReport,
     check_id: str,
@@ -88,8 +102,11 @@ def _resolve_candidate_layout(candidate_path: Path) -> CandidateLayout:
             warnings=warnings,
         )
 
-    if not resolved.is_file() or resolved.suffix != ".py":
-        raise ValueError(f"仅支持检查 .py 文件或包含 __init__.py 的包目录: {resolved}")
+    if not resolved.is_file() or not _is_python_plugin_file(resolved):
+        raise ValueError(f"仅支持检查 .py / .py.disabled 文件或包含 __init__.py 的包目录: {resolved}")
+
+    if resolved.name.endswith(".py.disabled"):
+        warnings.append("检测到禁用插件文件，检查时将按启用后的 .py 文件名暂存。")
 
     package_init = resolved.parent / "__init__.py"
     if resolved.name == "__init__.py" and package_init.exists():
@@ -115,7 +132,7 @@ def _resolve_candidate_layout(candidate_path: Path) -> CandidateLayout:
         source_path=resolved,
         root_path=resolved,
         mode="file",
-        expected_module_name=resolved.stem,
+        expected_module_name=_module_name_from_file(resolved),
         warnings=warnings,
     )
 
@@ -135,7 +152,7 @@ def _stage_candidate(layout: CandidateLayout) -> Path:
         shutil.copytree(layout.root_path, target, ignore=ignore)
         return target
 
-    target = workdir_root / layout.root_path.name
+    target = workdir_root / _enabled_file_name(layout.root_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(layout.root_path, target)
     return target
@@ -228,7 +245,18 @@ async def run_plugin_check(candidate_path: str | Path, level: PluginCheckLevel =
         report.staged_path = str(staged_entry)
         report.staged_entry_path = str(staged_entry)
 
-        await collector._try_load_plugin(staged_entry, is_builtin=False, is_package=False)
+        try:
+            await collector._try_load_plugin(staged_entry, is_builtin=False, is_package=False)
+        except Exception as e:
+            _add_check(
+                report,
+                "plugin_load",
+                "加载插件",
+                False,
+                detail="插件加载过程抛出异常",
+                error=str(e),
+            )
+            return report
         failed_plugins = collector.get_all_failed_plugins()
         loaded_plugins = collector.get_all_plugins()
 

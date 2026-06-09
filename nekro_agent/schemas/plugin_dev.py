@@ -20,9 +20,19 @@ class PluginDevVersionInfo(BaseModel):
     nekro_agent_channel: Literal["stable", "preview"] = "preview"
     nekro_agent_release: str = ""
     nekro_agent_git_commit: str = ""
+    source_origin: Literal[
+        "runtime_snapshot",
+        "cached_runtime",
+        "remote_git",
+        "cached_remote",
+        "disabled",
+        "unavailable",
+    ] = "runtime_snapshot"
     source_repo_url: str = ""
     source_ref: str = ""
     source_resolved_commit: str = ""
+    source_path: str = ""
+    source_dirty: bool = False
     source_locked_at: str = ""
     plugin_api_version: str = "preview"
     stable_plugin_api_version: str = "stable"
@@ -49,9 +59,19 @@ class PluginDevVersionUpdate(BaseModel):
     nekro_agent_channel: Literal["stable", "preview"] | None = None
     nekro_agent_release: str | None = None
     nekro_agent_git_commit: str | None = None
+    source_origin: Literal[
+        "runtime_snapshot",
+        "cached_runtime",
+        "remote_git",
+        "cached_remote",
+        "disabled",
+        "unavailable",
+    ] | None = None
     source_repo_url: str | None = None
     source_ref: str | None = None
     source_resolved_commit: str | None = None
+    source_path: str | None = None
+    source_dirty: bool | None = None
     source_locked_at: str | None = None
     plugin_api_version: str | None = None
     stable_plugin_api_version: str | None = None
@@ -66,6 +86,19 @@ class PluginDevGenerateRequest(BaseModel):
     base_code: str = ""
     dirty: bool = False
     mode: Literal["proposal"] = "proposal"
+
+
+class PluginDevInternalFileResponse(BaseModel):
+    file_path: str
+    content: str
+    sha256: str
+
+
+class PluginDevInternalProposalRequest(BaseModel):
+    file_path: str
+    content: str = Field(..., min_length=1)
+    task_id: str = Field(default="plugin-dev-internal", min_length=1)
+    summary: str = Field(default="由插件开发沙盒创建写入提案")
 
 
 class PluginDevGenerateResponse(BaseModel):

@@ -94,6 +94,7 @@ packages = ["nekro_agent", "plugins"]
 [tool.hatch.build.targets.wheel.force-include]
 "run_bot.py" = "run_bot.py"
 "run_nekro_cli.py" = "run_nekro_cli.py"
+"nekro_agent/services/plugin_dev/plugin_dev_skill.md" = "nekro_agent/services/plugin_dev/plugin_dev_skill.md"
 
 # ============================================================================
 # Tool Configurations

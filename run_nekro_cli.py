@@ -26,6 +26,7 @@ def _build_parser() -> argparse.ArgumentParser:
     plugin_check.add_argument("--level", choices=("load", "smoke", "strict"), default="smoke")
     plugin_check.add_argument("--timeout", type=int, default=30, help="子进程检查超时时间（秒）")
     plugin_check.add_argument("--json", action="store_true", help="输出 JSON 结果")
+    plugin_check.add_argument("--report-file", help="将 JSON 检查报告写入指定文件")
     plugin_check.add_argument("--keep-temp", action="store_true", help="保留本次检查的临时数据目录")
 
     worker_parser = subparsers.add_parser("__plugin-check-worker")
@@ -94,6 +95,14 @@ def _format_report(report: dict[str, Any], *, temp_root: str | None = None) -> s
     return "\n".join(lines)
 
 
+def _write_report_file(report: dict[str, Any], report_file: str | None) -> None:
+    if not report_file:
+        return
+    output_path = Path(report_file).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _run_plugin_check(args: argparse.Namespace) -> int:
     candidate_path = str(Path(args.path).expanduser().resolve())
     temp_root: str | None = None
@@ -102,6 +111,7 @@ def _run_plugin_check(args: argparse.Namespace) -> int:
 
     if not Path(candidate_path).exists():
         report = _build_fallback_report(candidate_path, args.level, f"插件路径不存在: {candidate_path}")
+        _write_report_file(report, args.report_file)
         if args.json:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         else:
@@ -148,6 +158,8 @@ def _run_plugin_check(args: argparse.Namespace) -> int:
 
     if args.keep_temp and temp_root:
         report["warnings"] = [*(report.get("warnings") or []), f"已保留临时目录: {temp_root}"]
+
+    _write_report_file(report, args.report_file)
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
