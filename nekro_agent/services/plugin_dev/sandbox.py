@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import secrets
+import shlex
 import shutil
 import tomllib
 from datetime import datetime, timezone
@@ -81,10 +82,10 @@ _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 - 不允许凭记忆编造内部包路径；无法在源码中确认的导入不要使用。
 - `/workspace/nekro-agent-source` 是只读参考源码，不得修改。
 - 不要自行联网拉取 GitHub main、latest 或最新 tag 作为参考；如果版本信息标记 `source_dirty`，仍以该本地快照为准。
-- 任务会提供插件工作副本路径和插件自检命令。候选代码必须先写入工作副本；只在回复里粘贴代码不算交付。
-- 确认自检通过后，优先调用内部网关创建 proposal；如果无法调用网关，也必须确保工作副本里已经是最终候选代码。
+- 任务会提供插件工作副本路径和插件自检命令。候选代码必须先写入工作副本，再由你在 CC 沙盒里运行该自检命令；只在回复里粘贴代码不算交付。
+- 只有 CC 沙盒自检通过后，才能调用内部网关创建 proposal；不要在自检前创建 proposal。如果无法调用网关，也必须确保工作副本里已经是最终候选代码。
 - 如需读取真实插件文件或提交写入提案，使用 `NEKRO_PLUGIN_DEV_INTERNAL_API_BASE`，请求头带 `X-Internal-API-Token: $INTERNAL_API_TOKEN`。
-- 内部网关只提供版本、文件列表、文件读取和 proposal 创建能力，真实写入仍由 NekroAgent 后端和用户确认完成。
+- 内部网关提供版本、文件列表、文件读取、自检和 proposal 创建能力，真实写入仍由 NekroAgent 后端和用户确认完成。
 
 ## 交付要求
 
@@ -92,6 +93,104 @@ _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 - 保留用户已有逻辑，除非任务明确要求删除。
 - 如果有风险、需要重载插件或涉及数据迁移，在代码块之外简要说明。
 """
+
+_PLUGIN_DEV_CHECK_HELPER = r'''from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+def _candidate_bases() -> list[str]:
+    raw_base = os.environ.get("NEKRO_PLUGIN_DEV_INTERNAL_API_BASE", "").rstrip("/")
+    bases = [raw_base] if raw_base else []
+    fallback = raw_base.replace("host.docker.internal", "172.17.0.1")
+    if fallback and fallback not in bases:
+        bases.append(fallback)
+    return bases
+
+
+def _fallback_report(candidate_path: str, detail: str) -> dict:
+    return {
+        "ok": False,
+        "level": "smoke",
+        "candidate_path": candidate_path,
+        "checks": [
+            {
+                "id": "internal_gateway_error",
+                "title": "调用插件自检网关",
+                "ok": False,
+                "detail": detail,
+                "error": detail,
+            }
+        ],
+        "warnings": [],
+        "errors": [detail],
+        "load_failures": [],
+    }
+
+
+def main() -> int:
+    if len(sys.argv) < 4:
+        print(json.dumps(_fallback_report("", "用法: plugin_dev_check.py <candidate_path> <file_path> <task_id> [level]"), ensure_ascii=False, indent=2))
+        return 2
+
+    candidate_path = sys.argv[1]
+    file_path = sys.argv[2]
+    task_id = sys.argv[3]
+    level = sys.argv[4] if len(sys.argv) > 4 else "smoke"
+    token = os.environ.get("INTERNAL_API_TOKEN", "")
+
+    try:
+        with open(candidate_path, "r", encoding="utf-8") as file:
+            content = file.read()
+    except OSError as exc:
+        print(json.dumps(_fallback_report(candidate_path, f"读取候选文件失败: {exc}"), ensure_ascii=False, indent=2))
+        return 1
+
+    payload = json.dumps(
+        {
+            "task_id": task_id,
+            "file_path": file_path,
+            "content": content,
+            "level": level,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    last_error = ""
+    for base in _candidate_bases():
+        req = urllib.request.Request(
+            base + "/check",
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-Internal-API-Token": token,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = resp.read().decode("utf-8")
+                print(body)
+                try:
+                    return 0 if json.loads(body).get("ok") else 1
+                except json.JSONDecodeError:
+                    return 1
+        except urllib.error.HTTPError as exc:
+            last_error = exc.read().decode("utf-8", errors="replace") or str(exc)
+        except Exception as exc:
+            last_error = str(exc)
+
+    print(json.dumps(_fallback_report(candidate_path, f"插件自检网关调用失败: {last_error or 'missing NEKRO_PLUGIN_DEV_INTERNAL_API_BASE'}"), ensure_ascii=False, indent=2))
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
 
 
 def _load_plugin_dev_skill() -> str:
@@ -266,6 +365,23 @@ class PluginDevSandboxService:
             raise RuntimeError(f"参考源码快照缺少 run_nekro_cli.py: {runtime_root}")
 
     @staticmethod
+    def _replace_directory_contents_preserve_root(source_dir: Path, temp_dir: Path) -> None:
+        if not source_dir.exists():
+            source_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(temp_dir), str(source_dir))
+            return
+
+        source_dir.mkdir(parents=True, exist_ok=True)
+        for child in source_dir.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        for child in temp_dir.iterdir():
+            shutil.move(str(child), str(source_dir / child.name))
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @staticmethod
     def _prepare_runtime_source_snapshot() -> tuple[Path, str]:
         runtime_root = PluginDevSandboxService._runtime_source_root()
         source_dir = PLUGIN_DEV_NEKRO_SOURCE_DIR
@@ -280,10 +396,7 @@ class PluginDevSandboxService:
             shutil.rmtree(temp_dir, ignore_errors=True)
         try:
             PluginDevSandboxService._copy_runtime_source_snapshot(runtime_root, temp_dir)
-            if source_dir.exists():
-                shutil.rmtree(source_dir, ignore_errors=True)
-            source_dir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(temp_dir), str(source_dir))
+            PluginDevSandboxService._replace_directory_contents_preserve_root(source_dir, temp_dir)
         finally:
             if temp_dir.exists():
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -393,6 +506,9 @@ class PluginDevSandboxService:
         default_dir.mkdir(exist_ok=True)
         (default_dir / ".mcp.json").write_text(json.dumps({"mcpServers": {}}, indent=2), encoding="utf-8")
         (default_dir / "CLAUDE.md").write_text(_PLUGIN_DEV_CLAUDE_MD, encoding="utf-8")
+        check_helper_path = default_dir / "plugin_dev_check.py"
+        check_helper_path.write_text(_PLUGIN_DEV_CHECK_HELPER, encoding="utf-8")
+        check_helper_path.chmod(0o777)
 
         shared_dir = default_dir / "shared"
         shared_dir.mkdir(exist_ok=True)
@@ -453,11 +569,42 @@ class PluginDevSandboxService:
             await docker.close()
 
     @staticmethod
+    async def _container_file_exists(container_name: str | None, file_path: str) -> bool:
+        if not container_name:
+            return False
+        docker = aiodocker.Docker()
+        try:
+            container = await docker.containers.get(container_name)
+            exec_inst = await container.exec(["test", "-f", file_path], stdout=True, stderr=True)
+            async with exec_inst.start(detach=False) as stream:
+                async for _ in stream:
+                    pass
+            info = await exec_inst.inspect()
+            return int(info.get("ExitCode", 1)) == 0
+        except Exception as e:
+            logger.warning(f"检查插件开发沙盒容器文件失败: {container_name}: {file_path}: {e}")
+            return False
+        finally:
+            await docker.close()
+
+    @staticmethod
     async def start() -> PluginDevSandboxState:
         state = PluginDevSandboxService._ensure_state()
         PluginDevSandboxService._write_runtime_files()
         reference_source_dir, reference_source_message = await PluginDevSandboxService._ensure_reference_source()
         logger.info(reference_source_message)
+
+        if state.status == "active" and await PluginDevSandboxService._container_running(state.container_name):
+            if reference_source_dir and not await PluginDevSandboxService._container_file_exists(
+                state.container_name,
+                f"{_PLUGIN_DEV_SOURCE_CONTAINER_PATH}/run_nekro_cli.py",
+            ):
+                logger.warning("插件开发沙盒参考源码挂载已过期，正在重建容器")
+                await PluginDevSandboxService._remove_container(state.container_name)
+                state.status = "stopped"
+                PluginDevSandboxService._save_state(state)
+            else:
+                return state
 
         if state.status == "active" and await PluginDevSandboxService._container_running(state.container_name):
             return state
@@ -572,14 +719,42 @@ class PluginDevSandboxService:
         PluginDevSandboxService._write_runtime_files()
 
     @staticmethod
+    def build_self_check_command(candidate_path: str, file_path: str, task_id: str, level: str = "smoke") -> str:
+        helper_path = f"{CONTAINER_WORKSPACE_PATH}/default/plugin_dev_check.py"
+        args = [
+            "python",
+            helper_path,
+            candidate_path,
+            file_path,
+            task_id,
+            level,
+        ]
+        return " ".join(shlex.quote(arg) for arg in args)
+
+    @staticmethod
     def prepare_task_workspace(file_path: str, current_code: str) -> str:
         current_root = PLUGIN_DEV_WORKSPACE_DIR / "default" / "current"
         if current_root.exists():
             shutil.rmtree(current_root, ignore_errors=True)
         current_root.mkdir(parents=True, exist_ok=True)
         staged_path = stage_plugin_candidate(file_path, current_code, current_root)
+        PluginDevSandboxService._make_tree_writable_for_sandbox(current_root)
         relative_path = staged_path.relative_to(PLUGIN_DEV_WORKSPACE_DIR / "default")
         return f"{CONTAINER_WORKSPACE_PATH}/default/{relative_path.as_posix()}"
+
+    @staticmethod
+    def _make_tree_writable_for_sandbox(path: Path) -> None:
+        if not path.exists():
+            return
+        if path.is_dir():
+            path.chmod(0o777)
+            for child in path.rglob("*"):
+                if child.is_dir():
+                    child.chmod(0o777)
+                else:
+                    child.chmod(0o666)
+            return
+        path.chmod(0o666)
 
     @staticmethod
     def resolve_workspace_host_path(container_path: str) -> Path:

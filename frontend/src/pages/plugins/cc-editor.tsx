@@ -20,10 +20,8 @@ import {
   TextField,
   Typography,
 } from '@mui/material'
-import Grid from '@mui/material/Grid2'
 import {
   Add as AddIcon,
-  AutoAwesome as AutoAwesomeIcon,
   Code as CodeIcon,
   History as HistoryIcon,
   PlayArrow as PlayArrowIcon,
@@ -209,6 +207,7 @@ interface ToolLogPayload {
 }
 
 const TOOL_PRIMARY_KEYS = ['command', 'file_path', 'pattern', 'url', 'query', 'prompt', 'notebook_path', 'path']
+const WRITE_TOOL_NAMES = new Set(['write', 'edit', 'multiedit', 'notebookedit'])
 
 const asRecord = (value: unknown): Record<string, unknown> => {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
@@ -259,6 +258,23 @@ const parseToolPayload = (rawPayload: string): ToolLogPayload | null => {
       primaryVal: getStringField(parsed, 'primary_value') || getStringField(parsed, 'primaryVal') || primary.value,
       content: stringifyToolValue(parsed.content).trim(),
       isError: parsed.is_error === true || parsed.isError === true,
+    }
+  } catch {
+    return null
+  }
+}
+
+const parseProposalToolOutput = (content: string): { proposalId: string; filePath: string } | null => {
+  const trimmed = content.trim()
+  if (!trimmed.startsWith('{')) return null
+  try {
+    const parsed = asRecord(JSON.parse(trimmed))
+    const proposalId = getStringField(parsed, 'proposal_id')
+    if (!proposalId) return null
+    if (!parsed.diff && !parsed.result_code) return null
+    return {
+      proposalId,
+      filePath: getStringField(parsed, 'file_path'),
     }
   } catch {
     return null
@@ -321,6 +337,8 @@ function ClaudeCodeFlowLog({ logs }: { logs: string[] }) {
     .filter(entry => {
       if (entry.kind !== 'toolResult') return true
       if (!entry.payload) return Boolean(entry.target || entry.detailText)
+      const toolName = entry.tool.toLowerCase()
+      if ((toolName === 'read' || WRITE_TOOL_NAMES.has(toolName)) && !entry.payload.isError) return false
       return entry.payload.isError || Boolean(entry.payload.content.trim())
     })
 
@@ -380,6 +398,13 @@ function ClaudeCodeFlowLog({ logs }: { logs: string[] }) {
 
     if (entry.kind === 'toolResult') {
       if (!content && !isError) return null
+      const proposalOutput = parseProposalToolOutput(content)
+      if (proposalOutput && !isError) {
+        return renderDetailBlock(
+          '输出',
+          `已创建写入提案：${proposalOutput.proposalId}${proposalOutput.filePath ? ` (${proposalOutput.filePath})` : ''}`
+        )
+      }
       return (
         <Stack spacing={0.35} sx={{ mt: 0.25 }}>
           {isError ? (
@@ -398,6 +423,10 @@ function ClaudeCodeFlowLog({ logs }: { logs: string[] }) {
           {renderDetailBlock(isError ? '错误输出' : '输出', content, isError ? 'error' : 'default')}
         </Stack>
       )
+    }
+
+    if (toolName === 'read' || WRITE_TOOL_NAMES.has(toolName)) {
+      return null
     }
 
     if (isBash) {
@@ -494,7 +523,6 @@ interface TaskStatusHeaderProps {
   selectedFile: string
   isGenerating: boolean
   isApplyingProposal: boolean
-  canGenerate: boolean
   canOpenHistory: boolean
   canStopTask: boolean
   canReconnectTaskStream: boolean
@@ -503,7 +531,6 @@ interface TaskStatusHeaderProps {
   onStartSandbox: () => void
   onStopTask: () => void
   onReconnectTaskStream: () => void
-  onGenerate: () => void
   t: Translate
 }
 
@@ -513,7 +540,6 @@ function TaskStatusHeader({
   selectedFile,
   isGenerating,
   isApplyingProposal,
-  canGenerate,
   canOpenHistory,
   canStopTask,
   canReconnectTaskStream,
@@ -522,14 +548,13 @@ function TaskStatusHeader({
   onStartSandbox,
   onStopTask,
   onReconnectTaskStream,
-  onGenerate,
   t,
 }: TaskStatusHeaderProps) {
   const sandboxRunning = status?.sandbox_status === 'running'
   const version = status?.version
 
   return (
-    <Paper sx={{ ...CARD_STYLES.DEFAULT, p: 2 }}>
+    <Paper sx={{ ...CARD_STYLES.DEFAULT, p: 2, flexShrink: 0 }}>
       <Stack spacing={1.5}>
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={1.5} alignItems={{ xs: 'stretch', md: 'center' }}>
           <Box sx={{ flexGrow: 1, minWidth: 0 }}>
@@ -588,14 +613,6 @@ function TaskStatusHeader({
             >
               {t('editor.pluginDev.stopTask')}
             </ActionButton>
-            <ActionButton
-              tone="primary"
-              startIcon={isGenerating ? <CircularProgress size={16} color="inherit" /> : <AutoAwesomeIcon />}
-              onClick={onGenerate}
-              disabled={!canGenerate || isApplyingProposal}
-            >
-              {isGenerating ? t('editor.pluginDev.generating') : t('editor.pluginDev.generate')}
-            </ActionButton>
           </Stack>
         </Stack>
       </Stack>
@@ -607,11 +624,16 @@ interface EditorContextPanelProps {
   files: string[]
   selectedFile: string
   code: string
+  proposalDiff: string
   hasLocalChanges: boolean
   isBusy: boolean
+  isApplyingProposal: boolean
+  canApplyProposal: boolean
   onFileSelect: (event: SelectChangeEvent<string>) => void
   onOpenCreatePlugin: () => void
   onCodeChange: (value: string) => void
+  onClearProposal: () => void
+  onApplyProposal: () => void
   t: Translate
 }
 
@@ -619,14 +641,20 @@ function EditorContextPanel({
   files,
   selectedFile,
   code,
+  proposalDiff,
   hasLocalChanges,
   isBusy,
+  isApplyingProposal,
+  canApplyProposal,
   onFileSelect,
   onOpenCreatePlugin,
   onCodeChange,
+  onClearProposal,
+  onApplyProposal,
   t,
 }: EditorContextPanelProps) {
   const theme = useTheme()
+  const hasProposalDiff = Boolean(proposalDiff)
 
   return (
     <Paper sx={{ ...CARD_STYLES.DEFAULT, p: 2, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, gap: 1.5 }}>
@@ -641,22 +669,38 @@ function EditorContextPanel({
           {t('editor.create')}
         </ActionButton>
       </Stack>
-      {hasLocalChanges && <Alert severity="warning" sx={{ flexShrink: 0 }}>{t('editor.pluginDev.unsavedContext')}</Alert>}
-      <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
+      {hasLocalChanges && !hasProposalDiff && <Alert severity="warning" sx={{ flexShrink: 0 }}>{t('editor.pluginDev.unsavedContext')}</Alert>}
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ flexShrink: 0 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexGrow: 1, minWidth: 0 }}>
           <CodeIcon fontSize="small" color="primary" />
-          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>{t('editor.pluginDev.sourceSnapshot')}</Typography>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+            {hasProposalDiff ? t('editor.pluginDev.currentProposal') : t('editor.pluginDev.sourceSnapshot')}
+          </Typography>
         </Box>
+        {hasProposalDiff ? (
+          <Stack direction="row" spacing={1} sx={{ flexShrink: 0, justifyContent: { xs: 'flex-start', sm: 'flex-end' }, flexWrap: 'wrap' }}>
+            <ActionButton tone="ghost" onClick={onClearProposal} disabled={isApplyingProposal}>
+              {t('editor.pluginDev.clearProposal')}
+            </ActionButton>
+            <ActionButton tone="primary" startIcon={<SaveIcon />} onClick={onApplyProposal} disabled={!canApplyProposal || isApplyingProposal}>
+              {isApplyingProposal ? t('editor.applying') : t('editor.pluginDev.applyProposal')}
+            </ActionButton>
+          </Stack>
+        ) : null}
       </Stack>
       <Box sx={{ flex: 1, minHeight: 0, border: 1, borderColor: 'divider', borderRadius: BORDER_RADIUS.DEFAULT, overflow: 'hidden' }}>
-        <Editor
-          height="100%"
-          defaultLanguage="python"
-          theme={theme.palette.mode === 'dark' ? 'vs-dark' : 'light'}
-          value={code}
-          onChange={value => onCodeChange(value || '')}
-          options={{ minimap: { enabled: false }, fontSize: 13, tabSize: 4, automaticLayout: true, formatOnPaste: true }}
-        />
+        {hasProposalDiff ? (
+          <DiffViewer diff={proposalDiff} />
+        ) : (
+          <Editor
+            height="100%"
+            defaultLanguage="python"
+            theme={theme.palette.mode === 'dark' ? 'vs-dark' : 'light'}
+            value={code}
+            onChange={value => onCodeChange(value || '')}
+            options={{ minimap: { enabled: false }, fontSize: 13, tabSize: 4, automaticLayout: true, formatOnPaste: true }}
+          />
+        )}
       </Box>
     </Paper>
   )
@@ -666,16 +710,10 @@ interface CcConversationPanelProps {
   prompt: string
   task: PluginDevTaskResponse | null
   status: PluginDevStatusResponse | null
-  generatedCode: string
   isGenerating: boolean
   isApplyingProposal: boolean
-  proposalReady: boolean
-  canApplyProposal: boolean
   onPromptChange: (value: string) => void
   onSend: () => void
-  onClearProposal: () => void
-  onApplyToEditor: () => void
-  onApplyProposal: () => void
   t: Translate
 }
 
@@ -683,23 +721,16 @@ function CcConversationPanel({
   prompt,
   task,
   status,
-  generatedCode,
   isGenerating,
   isApplyingProposal,
-  proposalReady,
-  canApplyProposal,
   onPromptChange,
   onSend,
-  onClearProposal,
-  onApplyToEditor,
-  onApplyProposal,
   t,
 }: CcConversationPanelProps) {
   const theme = useTheme()
   const composerRef = useRef(false)
   const messageScrollRef = useRef<HTMLDivElement | null>(null)
-  const canSend = Boolean(prompt.trim()) && !isGenerating && !isApplyingProposal && !proposalReady
-  const hasProposalContent = Boolean(proposalReady && (task?.diff || task?.result_code || generatedCode))
+  const canSend = Boolean(prompt.trim()) && !isGenerating && !isApplyingProposal
   const flowLogs = (task?.logs ?? [])
     .filter(log => log.trim() && !log.startsWith('CC 已返回约'))
 
@@ -713,7 +744,7 @@ function CcConversationPanel({
     const element = messageScrollRef.current
     if (!element) return
     element.scrollTop = element.scrollHeight
-  }, [generatedCode, isGenerating, task?.status, task?.diff, task?.result_code, task?.summary])
+  }, [isGenerating, task?.status, task?.logs, task?.summary])
 
   return (
     <Paper sx={{ ...CARD_STYLES.DEFAULT, p: 0, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -771,40 +802,6 @@ function CcConversationPanel({
             <ClaudeCodeFlowLog logs={flowLogs} />
           </Box>
         ) : null}
-
-        {hasProposalContent && (
-          <Stack direction="row" spacing={1.25} alignItems="flex-start">
-            <Box sx={{ width: 32, height: 32, borderRadius: BORDER_RADIUS.DEFAULT, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'primary.main', backgroundColor: alpha(theme.palette.primary.main, 0.12), flexShrink: 0 }}>
-              <SmartToyIcon fontSize="small" />
-            </Box>
-            <Paper variant="outlined" sx={{ overflow: 'hidden', width: 'min(100%, 780px)', maxWidth: '88%', backgroundColor: 'background.paper' }}>
-              <Stack spacing={1.25} sx={{ p: 1.25 }}>
-                <Box>
-                  <Typography variant="body2" sx={{ fontWeight: 800 }}>{t('editor.pluginDev.currentProposal')}</Typography>
-                  <Typography variant="caption" color="text.secondary">{task?.summary || t('editor.pluginDev.reviewHint')}</Typography>
-                </Box>
-                <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
-                  <ActionButton tone="ghost" onClick={onClearProposal} disabled={isApplyingProposal || (!generatedCode && !task)}>{t('editor.pluginDev.clearProposal')}</ActionButton>
-                  <ActionButton onClick={onApplyToEditor} disabled={!proposalReady || isApplyingProposal}>{t('editor.pluginDev.applyToEditor')}</ActionButton>
-                  <ActionButton tone="primary" startIcon={<SaveIcon />} onClick={onApplyProposal} disabled={!canApplyProposal || isApplyingProposal}>{isApplyingProposal ? t('editor.applying') : t('editor.pluginDev.applyProposal')}</ActionButton>
-                </Stack>
-              </Stack>
-              <Box sx={{ height: { xs: 280, md: 340 }, borderTop: 1, borderColor: 'divider' }}>
-                {task?.diff ? (
-                  <DiffViewer diff={task.diff} />
-                ) : (
-                  <Editor
-                    height="100%"
-                    defaultLanguage="python"
-                    theme={theme.palette.mode === 'dark' ? 'vs-dark' : 'light'}
-                    value={generatedCode || t('editor.pluginDev.placeholder')}
-                    options={{ readOnly: true, minimap: { enabled: false }, fontSize: 13, wordWrap: 'on', automaticLayout: true, scrollBeyondLastLine: false }}
-                  />
-                )}
-              </Box>
-            </Paper>
-          </Stack>
-        )}
 
         {isGenerating && (
           <Box sx={{ width: '100%', display: 'flex', justifyContent: 'center', py: 1 }}>
@@ -972,12 +969,13 @@ export default function PluginCcEditorPage() {
   const taskStreamCleanupRef = useRef<(() => void) | null>(null)
   const taskStreamFallbackRef = useRef(false)
   const terminalNotifiedTaskIdsRef = useRef<Set<string>>(new Set())
+  const syncedCandidateKeyRef = useRef('')
   const mountedRef = useRef(false)
 
   const hasPendingProposal = task?.status === 'waiting_apply'
   const hasRunningTask = Boolean(task && RUNNING_TASK_STATUSES.has(task.status))
   const currentTaskId = task?.task_id || activeTaskId
-  const proposalReady = Boolean(task?.proposal_id && task.result_code)
+  const proposalReady = hasPendingProposal && Boolean(task?.proposal_id && task.result_code)
   const canApplyProposal = proposalReady && hasPendingProposal
   const hasLocalChanges = code !== originalCode
   const isBusy = isGenerating || isApplyingProposal
@@ -1070,6 +1068,7 @@ export default function PluginCcEditorPage() {
     stopTaskStream()
     stopTaskPolling()
     restoredTaskIdRef.current = null
+    syncedCandidateKeyRef.current = ''
     setSelectedFile(file)
     try {
       const content = await pluginEditorApi.getPluginFileContent(file)
@@ -1123,10 +1122,37 @@ export default function PluginCcEditorPage() {
     pollingTaskIdRef.current = null
   }
 
+  const syncProposalFileContext = (nextTask: PluginDevTaskResponse) => {
+    if (!nextTask.result_code) return
+
+    const candidateKey = `${nextTask.task_id}:${nextTask.file_path}:${nextTask.result_code.length}:${nextTask.result_code.slice(0, 64)}`
+    if (syncedCandidateKeyRef.current === candidateKey) return
+    syncedCandidateKeyRef.current = candidateKey
+
+    if (nextTask.file_path === selectedFile) {
+      return
+    }
+
+    void pluginEditorApi.getPluginFileContent(nextTask.file_path)
+      .then(fileContent => {
+        if (!mountedRef.current || syncedCandidateKeyRef.current !== candidateKey) return
+        setSelectedFile(nextTask.file_path)
+        setOriginalCode(fileContent || '')
+        setCode(fileContent || '')
+      })
+      .catch(error => {
+        if (!mountedRef.current || syncedCandidateKeyRef.current !== candidateKey) return
+        syncedCandidateKeyRef.current = ''
+        const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
+        notification.error(`${t('editor.messages.loadContentFailed')}: ${message}`)
+      })
+  }
+
   const applyTaskSnapshot = (nextTask: PluginDevTaskResponse): boolean => {
     setTask(nextTask)
     if (nextTask.diff || nextTask.result_code) {
       setGeneratedCode(nextTask.diff || nextTask.result_code)
+      syncProposalFileContext(nextTask)
     } else {
       setGeneratedCode([`${t('editor.pluginDev.progress')}: ${nextTask.status}`, ...nextTask.logs].join('\n'))
     }
@@ -1232,6 +1258,7 @@ export default function PluginCcEditorPage() {
       stopTaskStream()
       stopTaskPolling()
       restoredTaskIdRef.current = null
+      syncedCandidateKeyRef.current = ''
       setFiles(pluginFiles)
       setSelectedFile(historyFile)
       setCode(content || '')
@@ -1319,12 +1346,15 @@ export default function PluginCcEditorPage() {
   }
 
   const handleGenerate = async () => {
-    if (!selectedFile) {
+    const previousTask = task
+    const pendingProposalId = hasPendingProposal ? previousTask?.proposal_id : null
+    const requestFile = hasPendingProposal && previousTask?.file_path ? previousTask.file_path : selectedFile
+    const requestCode = hasPendingProposal && previousTask?.result_code ? previousTask.result_code : code
+    const requestBaseCode = originalCode
+    const requestDirty = hasPendingProposal ? requestCode !== requestBaseCode : hasLocalChanges
+
+    if (!requestFile) {
       notification.error(t('editor.messages.selectPluginFirst'))
-      return
-    }
-    if (hasPendingProposal) {
-      notification.warning(t('editor.pluginDev.waitingApply'))
       return
     }
     if (!prompt.trim()) {
@@ -1335,22 +1365,27 @@ export default function PluginCcEditorPage() {
     setIsGenerating(true)
     setTask(null)
     setActiveTaskId('')
+    syncedCandidateKeyRef.current = ''
     setGeneratedCode(t('editor.pluginDev.waiting'))
     setPrompt('')
     try {
       const response = await pluginDevApi.generate({
-        file_path: selectedFile,
+        file_path: requestFile,
         prompt: submittedPrompt,
-        current_code: code,
-        base_code: originalCode,
-        dirty: hasLocalChanges,
+        current_code: requestCode,
+        base_code: requestBaseCode,
+        dirty: requestDirty,
         mode: 'proposal',
       })
+      if (pendingProposalId) {
+        void pluginDevApi.discardProposal(pendingProposalId).catch(() => undefined)
+      }
       restoredTaskIdRef.current = response.task_id
       setActiveTaskId(response.task_id)
       startTaskStream(response.task_id)
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
+      setTask(previousTask)
       setIsGenerating(false)
       notification.error(`${t('editor.messages.pluginDevGenerateFailed')}: ${message}`)
     }
@@ -1380,26 +1415,13 @@ export default function PluginCcEditorPage() {
     notification.info(t('editor.messages.pluginDevStreamReconnected'))
   }
 
-  const handleApplyToEditor = async () => {
-    if (!task?.result_code) return
-
-    const proposalFile = task.file_path
-    const fileContent = proposalFile === selectedFile
-      ? originalCode
-      : await pluginEditorApi.getPluginFileContent(proposalFile)
-
-    setSelectedFile(proposalFile)
-    setOriginalCode(fileContent || '')
-    setCode(task.result_code)
-    notification.success(t('editor.messages.applySuccess'))
-  }
-
   const handleClearProposal = async () => {
     const currentTask = task
     const taskId = currentTask?.task_id || activeTaskId
 
     stopTaskPolling()
     restoredTaskIdRef.current = null
+    syncedCandidateKeyRef.current = ''
     stopTaskStream()
 
     try {
@@ -1435,6 +1457,7 @@ export default function PluginCcEditorPage() {
       setOriginalCode(content || '')
       setTask(prev => prev ? { ...prev, status: 'applied' } : prev)
       setActiveTaskId('')
+      syncedCandidateKeyRef.current = ''
       setGeneratedCode(content || '')
       if (historyOpen) {
         await loadHistoryForFile(proposalFile)
@@ -1449,14 +1472,25 @@ export default function PluginCcEditorPage() {
   }
 
   return (
-    <Box sx={{ height: 'calc(100vh - 64px)', minHeight: 0, overflow: 'auto', p: 2, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', gap: 2 }}>
+    <Box
+      sx={{
+        height: '100%',
+        maxHeight: '100%',
+        minHeight: 0,
+        overflow: 'hidden',
+        p: 2,
+        boxSizing: 'border-box',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+      }}
+    >
       <TaskStatusHeader
         status={status}
         task={task}
         selectedFile={task?.file_path || selectedFile}
         isGenerating={isGenerating}
         isApplyingProposal={isApplyingProposal}
-        canGenerate={!isGenerating && !hasPendingProposal && Boolean(prompt.trim() && selectedFile)}
         canOpenHistory={Boolean(task?.file_path || selectedFile)}
         canStopTask={canStopTask}
         canReconnectTaskStream={canReconnectTaskStream}
@@ -1465,43 +1499,57 @@ export default function PluginCcEditorPage() {
         onStartSandbox={handleStartSandbox}
         onStopTask={handleStopTask}
         onReconnectTaskStream={handleReconnectTaskStream}
-        onGenerate={handleGenerate}
         t={t}
       />
 
-      <Grid container spacing={2} sx={{ flex: { xs: '0 0 auto', xl: 1 }, minHeight: { xs: 'auto', xl: 0 }, alignItems: 'stretch' }}>
-        <Grid size={{ xs: 12, xl: 5 }} sx={{ minHeight: { xs: 520, xl: 0 }, display: 'flex' }}>
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          overflow: 'hidden',
+          display: 'grid',
+          gap: 2,
+          gridTemplateColumns: {
+            xs: 'minmax(0, 1fr)',
+            xl: 'minmax(360px, 5fr) minmax(0, 7fr)',
+          },
+          gridTemplateRows: {
+            xs: 'minmax(0, 0.9fr) minmax(0, 1.1fr)',
+            xl: 'minmax(0, 1fr)',
+          },
+        }}
+      >
+        <Box sx={{ minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex' }}>
           <EditorContextPanel
             files={files}
             selectedFile={selectedFile}
             code={code}
+            proposalDiff={hasPendingProposal ? task?.diff || '' : ''}
             hasLocalChanges={hasLocalChanges}
             isBusy={isInteractionLocked}
+            isApplyingProposal={isApplyingProposal}
+            canApplyProposal={canApplyProposal}
             onFileSelect={handleFileSelect}
             onOpenCreatePlugin={() => setNewPluginOpen(true)}
             onCodeChange={handleCodeChange}
+            onClearProposal={handleClearProposal}
+            onApplyProposal={handleApplyProposal}
             t={t}
           />
-        </Grid>
-        <Grid size={{ xs: 12, xl: 7 }} sx={{ minHeight: { xs: 560, xl: 0 }, display: 'flex' }}>
+        </Box>
+        <Box sx={{ minWidth: 0, minHeight: 0, overflow: 'hidden', display: 'flex' }}>
           <CcConversationPanel
             prompt={prompt}
-            generatedCode={generatedCode}
             task={task}
             status={status}
             isGenerating={isGenerating}
             isApplyingProposal={isApplyingProposal}
-            proposalReady={proposalReady}
-            canApplyProposal={canApplyProposal}
             onPromptChange={setPrompt}
             onSend={handleGenerate}
-            onClearProposal={handleClearProposal}
-            onApplyToEditor={handleApplyToEditor}
-            onApplyProposal={handleApplyProposal}
             t={t}
           />
-        </Grid>
-      </Grid>
+        </Box>
+      </Box>
 
       <Dialog open={newPluginOpen} onClose={() => setNewPluginOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>{t('editor.newPlugin')}</DialogTitle>

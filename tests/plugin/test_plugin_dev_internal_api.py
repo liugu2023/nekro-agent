@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,7 @@ def test_plugin_dev_internal_gateway_creates_proposal_without_writing_file(tmp_p
     monkeypatch.setenv("NEKRO_DATA_DIR", str(tmp_path / "data"))
 
     from nekro_agent.routers.plugin_dev import internal_router
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
     from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
     from nekro_agent.services.plugin_dev.tasks import get_latest_pending_proposal_for_task
 
@@ -45,6 +47,15 @@ def test_plugin_dev_internal_gateway_creates_proposal_without_writing_file(tmp_p
         proposal_root,
     )
     monkeypatch.setattr(PluginDevSandboxService, "get_internal_api_token", staticmethod(lambda: "secret-token"))
+
+    async def fake_run_plugin_self_check(file_path: str, code: str, level: str = "smoke"):
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    monkeypatch.setattr("nekro_agent.routers.plugin_dev.run_plugin_self_check", fake_run_plugin_self_check)
 
     app = FastAPI()
     app.include_router(internal_router)
@@ -80,6 +91,19 @@ def test_plugin_dev_internal_gateway_creates_proposal_without_writing_file(tmp_p
     assert latest_proposal.proposal_id == proposal["proposal_id"]
     assert plugin_file.read_text(encoding="utf-8") == "plugin = None\n"
 
+    check_response = client.post(
+        "/internal/plugin-dev/check",
+        headers=headers,
+        json={
+            "file_path": "demo.py",
+            "content": "plugin = 'checked'\n",
+            "task_id": "test-task",
+            "level": "smoke",
+        },
+    )
+    assert check_response.status_code == 200
+    assert check_response.json()["ok"] is True
+
 
 def test_plugin_dev_reference_source_uses_runtime_snapshot(tmp_path: Path, monkeypatch):
     from nekro_agent.services.plugin_dev import sandbox
@@ -92,17 +116,47 @@ def test_plugin_dev_reference_source_uses_runtime_snapshot(tmp_path: Path, monke
 
     monkeypatch.setattr(sandbox, "PLUGIN_DEV_NEKRO_SOURCE_DIR", source_dir)
     monkeypatch.setattr(sandbox, "update_source_lock_info", fake_update_source_lock_info)
+    source_dir.mkdir(parents=True)
+    old_inode = source_dir.stat().st_ino
+    (source_dir / "stale.txt").write_text("old", encoding="utf-8")
 
     result_dir, message = sandbox.PluginDevSandboxService._prepare_runtime_source_snapshot()
 
     assert result_dir == source_dir
     assert "本地运行环境源码快照" in message
+    assert source_dir.stat().st_ino == old_inode
+    assert not (source_dir / "stale.txt").exists()
     assert (source_dir / "nekro_agent").is_dir()
     assert (source_dir / "run_nekro_cli.py").is_file()
     assert not (source_dir / ".git").exists()
     assert captured["source_origin"] == "runtime_snapshot"
     assert captured["source_path"] == str(source_dir.resolve())
     assert isinstance(captured["source_dirty"], bool)
+
+
+def test_plugin_dev_task_workspace_is_writable_by_sandbox_user(tmp_path: Path, monkeypatch):
+    from nekro_agent.services.plugin_dev import sandbox
+
+    plugin_root = tmp_path / "plugins"
+    workspace_dir = tmp_path / "workspace"
+    plugin_root.mkdir()
+    (plugin_root / "demo.py").write_text("plugin = None\n", encoding="utf-8")
+
+    monkeypatch.setattr(sandbox, "PLUGIN_DEV_WORKSPACE_DIR", workspace_dir)
+    monkeypatch.setattr(
+        "nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR",
+        str(plugin_root),
+    )
+
+    container_path = sandbox.PluginDevSandboxService.prepare_task_workspace("demo.py", "plugin = 'candidate'\n")
+    staged_path = workspace_dir / "default" / "current" / "demo.py"
+
+    assert container_path == "/workspace/default/current/demo.py"
+    assert staged_path.read_text(encoding="utf-8") == "plugin = 'candidate'\n"
+    assert stat.S_IMODE((workspace_dir / "default" / "current").stat().st_mode) == 0o777
+    assert stat.S_IMODE(staged_path.stat().st_mode) == 0o666
+    command = sandbox.PluginDevSandboxService.build_self_check_command(container_path, "demo.py", "task-1")
+    assert command == "python /workspace/default/plugin_dev_check.py /workspace/default/current/demo.py demo.py task-1 smoke"
 
 
 @pytest.mark.asyncio
@@ -154,7 +208,7 @@ async def test_plugin_dev_task_retries_cc_after_self_check_failure(tmp_path: Pat
             "name": "Bash",
             "tool_use_id": "tool-bash",
             "input": {
-                "command": "python /workspace/nekro-agent-source/run_nekro_cli.py plugin check /workspace/default/current/demo.py --json",
+                "command": "python /workspace/default/plugin_dev_check.py /workspace/default/current/demo.py demo.py plugin-dev-retry-test smoke",
                 "description": "执行插件自检",
                 "cwd": "/workspace/default",
             },
@@ -226,10 +280,10 @@ async def test_plugin_dev_task_retries_cc_after_self_check_failure(tmp_path: Pat
     assert any("工具结果：" in log and '"name":"Edit"' in log for log in task_data["logs"])
     assert any('"name":"Read"' in log and '"/workspace/default/current/demo.py"' in log for log in task_data["logs"])
     assert any('"name":"Write"' in log and '"/workspace/default/current/demo.py"' in log for log in task_data["logs"])
-    assert any('"name":"Bash"' in log and "run_nekro_cli.py plugin check" in log for log in task_data["logs"])
+    assert any('"name":"Bash"' in log and "plugin_dev_check.py" in log for log in task_data["logs"])
     assert any("工具结果：" in log and '"name":"Bash"' in log and "自检命令已执行" in log for log in task_data["logs"])
     assert any("检测到 CC 已修改工作副本" in log for log in task_data["logs"])
-    assert any("自检未通过，已将失败报告交回 CC 自动修复" in log for log in task_data["logs"])
+    assert any("宿主机复核未通过，已将失败报告交回 CC 自动修复" in log for log in task_data["logs"])
 
 
 @pytest.mark.asyncio

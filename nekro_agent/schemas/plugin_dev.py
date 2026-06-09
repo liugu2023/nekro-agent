@@ -101,6 +101,13 @@ class PluginDevInternalProposalRequest(BaseModel):
     summary: str = Field(default="由插件开发沙盒创建写入提案")
 
 
+class PluginDevInternalCheckRequest(BaseModel):
+    file_path: str
+    content: str = Field(..., min_length=1)
+    task_id: str = Field(default="plugin-dev-internal", min_length=1)
+    level: Literal["load", "smoke", "strict"] = "smoke"
+
+
 class PluginDevGenerateResponse(BaseModel):
     task_id: str
     status: PluginDevTaskStatus
