@@ -49,9 +49,12 @@ def get_version_info() -> PluginDevVersionInfo:
             "nekro_agent_channel": "preview",
             "nekro_agent_release": "",
             "nekro_agent_git_commit": "",
+            "source_origin": "runtime_snapshot",
             "source_repo_url": "",
             "source_ref": "",
             "source_resolved_commit": "",
+            "source_path": "",
+            "source_dirty": False,
             "source_locked_at": "",
             "plugin_api_version": "preview",
             "stable_plugin_api_version": "stable",
@@ -77,7 +80,16 @@ def update_version_info(body: PluginDevVersionUpdate) -> PluginDevVersionInfo:
 
 
 def update_source_lock_info(
-    *, repo_url: str, source_ref: str, resolved_commit: str, channel: str, release: str
+    *,
+    repo_url: str,
+    source_ref: str,
+    resolved_commit: str,
+    channel: str,
+    release: str,
+    source_origin: str,
+    source_path: str,
+    source_dirty: bool,
+    notes: str,
 ) -> PluginDevVersionInfo:
     current = get_version_info().model_dump()
     current.update(
@@ -85,12 +97,16 @@ def update_source_lock_info(
             "nekro_agent_channel": channel,
             "nekro_agent_release": release,
             "nekro_agent_git_commit": resolved_commit,
+            "source_origin": source_origin,
             "source_repo_url": repo_url,
             "source_ref": source_ref,
             "source_resolved_commit": resolved_commit,
+            "source_path": source_path,
+            "source_dirty": source_dirty,
             "source_locked_at": utc_now_iso(),
-            "plugin_api_version": channel,
+            "plugin_api_version": "runtime",
             "updated_at": utc_now_iso(),
+            "notes": notes,
         }
     )
     info = PluginDevVersionInfo.model_validate(current)

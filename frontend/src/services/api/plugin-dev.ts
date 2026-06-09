@@ -1,4 +1,7 @@
 import axios from './axios'
+import { createEventStream } from './utils/stream'
+
+const encodePathParam = (filePath: string): string => filePath.split('/').map(encodeURIComponent).join('/')
 
 export type PluginDevTaskStatus =
   | 'pending'
@@ -14,9 +17,12 @@ export interface PluginDevVersionInfo {
   nekro_agent_channel: 'stable' | 'preview'
   nekro_agent_release: string
   nekro_agent_git_commit: string
+  source_origin: 'runtime_snapshot' | 'cached_runtime' | 'remote_git' | 'cached_remote' | 'disabled' | 'unavailable'
   source_repo_url: string
   source_ref: string
   source_resolved_commit: string
+  source_path: string
+  source_dirty: boolean
   source_locked_at: string
   plugin_api_version: string
   stable_plugin_api_version: string
@@ -97,6 +103,10 @@ export interface PluginDevHistoryResponse {
   versions: PluginDevHistoryItem[]
 }
 
+export type PluginDevTaskStreamEvent =
+  | { type: 'task'; task: PluginDevTaskResponse }
+  | { type: 'done'; status: PluginDevTaskStatus }
+
 export const pluginDevApi = {
   getStatus: async (): Promise<PluginDevStatusResponse> => {
     const response = await axios.get<PluginDevStatusResponse>('/plugin-dev/status')
@@ -157,15 +167,38 @@ export const pluginDevApi = {
   },
 
   getHistory: async (filePath: string): Promise<PluginDevHistoryResponse> => {
-    const response = await axios.get<PluginDevHistoryResponse>(`/plugin-dev/history/${encodeURIComponent(filePath)}`)
+    const response = await axios.get<PluginDevHistoryResponse>(`/plugin-dev/history/${encodePathParam(filePath)}`)
     return response.data
   },
 
   rollback: async (filePath: string, versionId: string, target: 'before' | 'after' = 'before'): Promise<PluginDevApplyResponse> => {
-    const response = await axios.post<PluginDevApplyResponse>(`/plugin-dev/rollback/${encodeURIComponent(filePath)}`, {
+    const response = await axios.post<PluginDevApplyResponse>(`/plugin-dev/rollback/${encodePathParam(filePath)}`, {
       version_id: versionId,
       target,
     })
     return response.data
   },
+}
+
+export const streamPluginDevTask = (
+  taskId: string,
+  onEvent: (event: PluginDevTaskStreamEvent) => void,
+  onError?: (error: Error) => void,
+  signal?: AbortSignal
+) => {
+  return createEventStream({
+    endpoint: `/plugin-dev/tasks/${encodeURIComponent(taskId)}/stream`,
+    onMessage: data => {
+      const trimmedData = data.trim()
+      if (!trimmedData || !trimmedData.startsWith('{')) return
+      try {
+        const event = JSON.parse(trimmedData) as PluginDevTaskStreamEvent
+        onEvent(event)
+      } catch (error) {
+        console.warn('Failed to parse plugin dev task stream event:', error, trimmedData)
+      }
+    },
+    onError,
+    signal,
+  })
 }

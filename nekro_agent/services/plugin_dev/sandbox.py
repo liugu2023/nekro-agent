@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import random
-import re
 import secrets
 import shutil
+import tomllib
 from datetime import datetime, timezone
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal
 
@@ -18,7 +19,6 @@ from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.core.os_env import OsEnv
 from nekro_agent.models.db_workspace import DBWorkspace
 from nekro_agent.schemas.errors import OperationFailedError, ValidationError
-from nekro_agent.services.network.proxy_manager import SystemProxyFeature, build_subprocess_proxy_env, mask_proxy_url
 from nekro_agent.services.plugin_dev.config import get_plugin_dev_config
 from nekro_agent.services.plugin_dev.paths import (
     PLUGIN_DEV_NEKRO_SOURCE_DIR,
@@ -34,45 +34,37 @@ from nekro_agent.services.workspace.container import (
     _get_host_timezone,
     _resolve_nekro_network,
 )
-from nekro_agent.tools.docker_util import get_self_container
 
 logger = get_sub_logger("plugin_dev_sandbox")
 
 _PLUGIN_DEV_SKILL_NAME = "plugin-dev"
 _PLUGIN_DEV_CONTAINER_PREFIX = "nekro-plugin-dev-cc"
 _PLUGIN_DEV_SOURCE_CONTAINER_PATH = f"{CONTAINER_WORKSPACE_PATH}/nekro-agent-source"
-
-_PLUGIN_DEV_SKILL = """---
-name: plugin-dev
-description: NekroAgent 插件开发、修复、迁移与审查规范。处理插件代码时必须使用。
----
-
-# NekroAgent 插件开发规范
-
-你是 NekroAgent 的插件开发专用 Claude Code 沙盒。
-
-## 必须遵守
-
-- 每次处理插件代码前，先读取任务中的版本信息，确认 stable/preview API 对齐。
-- 输出完整单文件插件代码，不要输出省略片段。
-- 保留用户已有逻辑，除非任务明确要求删除。
-- 如果涉及配置，使用 `ConfigBase`。
-- 如果涉及 Agent 可调用能力，使用 `NekroPlugin.mount_sandbox_method`。
-- 不要假设 GitHub main 等于当前稳定版；以任务注入的版本文件为准。
-- 编写插件前必须先参考 `/workspace/nekro-agent-source` 中的插件 API、配置、事件、方法挂载和已有插件示例。
-- 所有 import 路径、类名、函数名、装饰器和枚举必须以 `/workspace/nekro-agent-source` 中真实存在的源码为准。
-- 使用任何 NekroAgent 包前，必须先在源码中确认该模块和符号存在；不允许凭记忆编造 `nekro_agent.*`、`plugins.*` 或其他内部导入路径。
-- 如果找不到可导入的模块或符号，必须改用源码中已存在的等价 API，或在说明中标明无法确认，不能输出会导入失败的代码。
-- `/workspace/nekro-agent-source` 是只读参考源码，不要修改它，也不要把它当作输出目录。
-- 任务会提供一个可写的插件工作副本路径和插件自检命令。交付最终代码前，先把候选代码写入该工作副本并运行自检命令。
-- 若插件自检失败，必须继续修复直到通过；若因环境缺少依赖无法执行自检，必须在最终说明中明确指出。
-- 不要直接要求宿主机文件权限；真实文件写入由 NekroAgent 后端 proposal/版本系统完成。
-
-## 输出要求
-
-最终回复必须包含一个 Python 代码块，代码块内容是完整的新插件文件。
-代码块之外可以简要说明风险、是否需要重载插件、是否涉及数据迁移。
-"""
+_PLUGIN_DEV_SKILL_PATH = Path(__file__).with_name("plugin_dev_skill.md")
+_RUNTIME_SOURCE_ENTRIES = (
+    "nekro_agent",
+    "plugins",
+    "run_nekro_cli.py",
+    "pyproject.toml",
+    "README.md",
+    "README_en.md",
+    "LICENSE",
+    "migrations",
+)
+_RUNTIME_SOURCE_IGNORE_PATTERNS = (
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".basedpyright",
+    ".venv",
+    "node_modules",
+    "dist",
+    "build",
+    ".git",
+)
 
 _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 
@@ -84,11 +76,15 @@ _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 - 不要尝试直接访问或写入宿主机插件目录。
 - 真实插件文件写入由 NekroAgent 后端的 proposal、版本记录和用户确认流程完成。
 - 每次处理插件任务时必须使用 `plugin-dev` skill。
-- 编写插件前先查看 `/workspace/nekro-agent-source` 的当前源码，优先参考已有插件 API、配置、事件和方法挂载写法。
+- 编写插件前先查看 `/workspace/nekro-agent-source` 的当前源码，优先参考已有插件 API、配置、事件和方法挂载写法；该目录是宿主 NekroAgent 当前运行环境的本地快照。
 - 所有 import 路径和使用到的类、函数、装饰器、枚举必须能在 `/workspace/nekro-agent-source` 中找到对应定义。
 - 不允许凭记忆编造内部包路径；无法在源码中确认的导入不要使用。
 - `/workspace/nekro-agent-source` 是只读参考源码，不得修改。
-- 任务会提供插件工作副本路径和插件自检命令。请先把候选代码写入工作副本，再运行自检命令，确认通过后再输出最终代码。
+- 不要自行联网拉取 GitHub main、latest 或最新 tag 作为参考；如果版本信息标记 `source_dirty`，仍以该本地快照为准。
+- 任务会提供插件工作副本路径和插件自检命令。候选代码必须先写入工作副本；只在回复里粘贴代码不算交付。
+- 确认自检通过后，优先调用内部网关创建 proposal；如果无法调用网关，也必须确保工作副本里已经是最终候选代码。
+- 如需读取真实插件文件或提交写入提案，使用 `NEKRO_PLUGIN_DEV_INTERNAL_API_BASE`，请求头带 `X-Internal-API-Token: $INTERNAL_API_TOKEN`。
+- 内部网关只提供版本、文件列表、文件读取和 proposal 创建能力，真实写入仍由 NekroAgent 后端和用户确认完成。
 
 ## 交付要求
 
@@ -96,6 +92,10 @@ _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 - 保留用户已有逻辑，除非任务明确要求删除。
 - 如果有风险、需要重载插件或涉及数据迁移，在代码块之外简要说明。
 """
+
+
+def _load_plugin_dev_skill() -> str:
+    return _PLUGIN_DEV_SKILL_PATH.read_text(encoding="utf-8")
 
 
 class PluginDevSandboxState(BaseModel):
@@ -119,6 +119,18 @@ class PluginDevSandboxState(BaseModel):
         if self.host_port:
             return f"http://127.0.0.1:{self.host_port}"
         raise ValueError("插件开发沙盒尚无可用的 API 地址")
+
+
+class PluginDevSandboxRuntimeInfo(BaseModel):
+    container_name: str = ""
+    container_id: str = ""
+    api_endpoint: str = ""
+    healthy: bool = False
+    preset_id: int | None = None
+    preset_name: str = ""
+    model_type: str = ""
+    model_label: str = ""
+    tools: list[str] = []
 
 
 class PluginDevSandboxService:
@@ -158,6 +170,10 @@ class PluginDevSandboxService:
         return PluginDevSandboxService._save_state(state)
 
     @staticmethod
+    def get_internal_api_token() -> str:
+        return PluginDevSandboxService._ensure_state().sandbox_api_token
+
+    @staticmethod
     def _resolve_plugin_dev_preset():
         from nekro_agent.core.cc_model_presets import cc_presets_store
 
@@ -169,119 +185,172 @@ class PluginDevSandboxService:
         return cc_presets_store.ensure_default()
 
     @staticmethod
-    def _parse_image_tag(image: str) -> str | None:
-        if "@" in image:
-            image = image.split("@", 1)[0]
-        last_segment = image.rsplit("/", 1)[-1]
-        if ":" not in last_segment:
-            return None
-        return last_segment.rsplit(":", 1)[-1] or None
+    def _describe_plugin_dev_preset() -> dict[str, Any]:
+        preset = PluginDevSandboxService._resolve_plugin_dev_preset()
+        if preset.model_type == "preset":
+            model_label = preset.preset_model or "preset"
+        else:
+            model_label = preset.anthropic_model or "(未配置手动模型)"
+        return {
+            "preset_id": preset.id,
+            "preset_name": preset.name,
+            "model_type": preset.model_type,
+            "model_label": model_label,
+        }
 
     @staticmethod
-    async def _detect_release_channel() -> Literal["stable", "preview"]:
-        try:
-            container = await get_self_container()
-            info = await container.show()
-            name = str(info.get("Name") or "").strip("/")
-            image = str(info.get("Config", {}).get("Image") or "")
-            if "nekro_agent" not in name and "nekro-agent" not in image:
-                return "preview"
-            return "stable" if PluginDevSandboxService._parse_image_tag(image) == "latest" else "preview"
-        except Exception as e:
-            logger.info(f"无法通过 Docker 容器识别 Nekro Agent 版本通道，按预览版处理: {e}")
-            return "preview"
+    def _runtime_source_root() -> Path:
+        return Path(__file__).resolve().parents[3]
 
     @staticmethod
-    def _resolve_ref_commit(repo: git.Repo, source_ref: str, env: dict[str, str]) -> str:
-        repo.git.fetch("origin", source_ref, "--tags", env=env)
-        candidates = [
-            source_ref,
-            f"origin/{source_ref}",
-            f"refs/tags/{source_ref}",
-            f"refs/remotes/origin/{source_ref}",
-            "FETCH_HEAD",
-        ]
-        for candidate in candidates:
+    def _read_runtime_app_version(runtime_root: Path) -> str:
+        pyproject_path = runtime_root / "pyproject.toml"
+        if pyproject_path.exists():
             try:
-                return str(repo.commit(candidate).hexsha)
+                data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+                version = data.get("project", {}).get("version")
+                if isinstance(version, str) and version:
+                    return version
             except Exception:
-                continue
-        return str(repo.git.rev_parse(source_ref))
+                pass
+        try:
+            return importlib_metadata.version("nekro-agent")
+        except importlib_metadata.PackageNotFoundError:
+            return "unknown"
 
     @staticmethod
-    def _latest_semver_tag(repo: git.Repo, env: dict[str, str]) -> str:
-        repo.git.fetch("origin", "--tags", env=env)
-        tags = [tag.name for tag in repo.tags]
-        semver_tags: list[tuple[tuple[int, int, int], str]] = []
-        for tag in tags:
-            match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", tag)
-            if match:
-                semver_tags.append(((int(match.group(1)), int(match.group(2)), int(match.group(3))), tag))
-        if not semver_tags:
-            raise RuntimeError("未找到可用的正式版 tag")
-        semver_tags.sort(key=lambda item: item[0])
-        return semver_tags[-1][1]
+    def _runtime_git_info(runtime_root: Path) -> tuple[str, str, bool, bool]:
+        try:
+            repo = git.Repo(runtime_root, search_parent_directories=True)
+            commit = str(repo.head.commit.hexsha)
+            dirty = repo.is_dirty(untracked_files=True)
+            try:
+                ref = str(repo.active_branch.name)
+            except TypeError:
+                ref = "detached"
+            exact_tag = next((tag.name for tag in repo.tags if tag.commit == repo.head.commit), "")
+            return commit, exact_tag or ref, dirty, bool(exact_tag)
+        except Exception:
+            return "", "", False, False
 
     @staticmethod
-    def _resolve_source_target(
-        repo: git.Repo, channel: Literal["stable", "preview"], env: dict[str, str]
-    ) -> tuple[str, str, str]:
-        if channel == "stable":
-            source_ref = PluginDevSandboxService._latest_semver_tag(repo, env)
-            return source_ref, source_ref, PluginDevSandboxService._resolve_ref_commit(repo, source_ref, env)
-        source_ref = "main"
-        return source_ref, "main", PluginDevSandboxService._resolve_ref_commit(repo, source_ref, env)
+    def _copy_runtime_source_entry(runtime_root: Path, snapshot_root: Path, entry_name: str) -> bool:
+        source = runtime_root / entry_name
+        if not source.exists():
+            return False
+
+        target = snapshot_root / entry_name
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                target,
+                ignore=shutil.ignore_patterns(*_RUNTIME_SOURCE_IGNORE_PATTERNS),
+                symlinks=True,
+            )
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        return True
+
+    @staticmethod
+    def _copy_runtime_source_snapshot(runtime_root: Path, snapshot_root: Path) -> None:
+        copied = False
+        snapshot_root.mkdir(parents=True, exist_ok=True)
+        for entry_name in _RUNTIME_SOURCE_ENTRIES:
+            copied = PluginDevSandboxService._copy_runtime_source_entry(runtime_root, snapshot_root, entry_name) or copied
+        if not copied:
+            raise RuntimeError(f"未能从运行目录复制任何参考源码: {runtime_root}")
+        if not (snapshot_root / "nekro_agent").exists():
+            raise RuntimeError(f"参考源码快照缺少 nekro_agent 包: {runtime_root}")
+        if not (snapshot_root / "run_nekro_cli.py").exists():
+            raise RuntimeError(f"参考源码快照缺少 run_nekro_cli.py: {runtime_root}")
+
+    @staticmethod
+    def _prepare_runtime_source_snapshot() -> tuple[Path, str]:
+        runtime_root = PluginDevSandboxService._runtime_source_root()
+        source_dir = PLUGIN_DEV_NEKRO_SOURCE_DIR
+        temp_dir = source_dir.with_name(f"{source_dir.name}.tmp-{secrets.token_hex(4)}")
+
+        app_version = PluginDevSandboxService._read_runtime_app_version(runtime_root)
+        commit, ref, dirty, exact_tag = PluginDevSandboxService._runtime_git_info(runtime_root)
+        channel: Literal["stable", "preview"] = "stable" if app_version != "unknown" and not dirty and exact_tag else "preview"
+        release = app_version if app_version != "unknown" else ref
+
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        try:
+            PluginDevSandboxService._copy_runtime_source_snapshot(runtime_root, temp_dir)
+            if source_dir.exists():
+                shutil.rmtree(source_dir, ignore_errors=True)
+            source_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(temp_dir), str(source_dir))
+        finally:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+        notes = "参考源码来自当前运行环境的本地快照；无需访问 GitHub，且与宿主实际加载的插件 API 保持一致。"
+        if dirty:
+            notes += " 当前运行源码包含未提交修改。"
+        update_source_lock_info(
+            repo_url="",
+            source_ref=ref or release or "runtime",
+            resolved_commit=commit,
+            channel=channel,
+            release=release,
+            source_origin="runtime_snapshot",
+            source_path=str(source_dir.resolve()),
+            source_dirty=dirty,
+            notes=notes,
+        )
+        commit_label = commit[:12] if commit else "no-git"
+        dirty_label = " dirty" if dirty else ""
+        return source_dir, f"已生成 Nekro Agent 本地运行环境源码快照: {commit_label}{dirty_label}"
 
     @staticmethod
     async def _ensure_reference_source() -> tuple[Path | None, str]:
         plugin_dev_config = get_plugin_dev_config()
         if not plugin_dev_config.source_enabled:
+            update_source_lock_info(
+                repo_url="",
+                source_ref="disabled",
+                resolved_commit="",
+                channel="preview",
+                release="",
+                source_origin="disabled",
+                source_path="",
+                source_dirty=False,
+                notes="Nekro Agent 参考源码已在插件开发配置中禁用。",
+            )
             return None, "Nekro Agent 参考源码未启用"
 
-        source_dir = PLUGIN_DEV_NEKRO_SOURCE_DIR
-        channel = await PluginDevSandboxService._detect_release_channel()
-        env = build_subprocess_proxy_env(SystemProxyFeature.PLUGIN_UPDATE)
-        if env:
-            logger.info(f"使用代理 {mask_proxy_url(env.get('HTTPS_PROXY'))} 准备 Nekro Agent 参考源码")
-
         try:
-            source_dir.parent.mkdir(parents=True, exist_ok=True)
-            if not source_dir.exists():
-                git.Repo.clone_from(
-                    plugin_dev_config.source_repo_url,
-                    source_dir,
-                    no_checkout=True,
-                    env=env,
-                )
-
-            repo = git.Repo(source_dir)
-            source_ref, release, resolved_commit = PluginDevSandboxService._resolve_source_target(repo, channel, env)
-            repo.git.checkout(resolved_commit)
-            update_source_lock_info(
-                repo_url=plugin_dev_config.source_repo_url,
-                source_ref=source_ref,
-                resolved_commit=resolved_commit,
-                channel=channel,
-                release=release,
-            )
-            return source_dir, f"已按 {channel} 锁定 Nekro Agent 参考源码: {source_ref} -> {resolved_commit[:12]}"
+            return PluginDevSandboxService._prepare_runtime_source_snapshot()
         except Exception as e:
             logger.warning(f"准备 Nekro Agent 参考源码失败: {e}")
-            if source_dir.exists():
-                try:
-                    repo = git.Repo(source_dir)
-                    cached_commit = str(repo.head.commit.hexsha)
-                    fallback_ref = "main" if channel == "preview" else "latest"
-                    update_source_lock_info(
-                        repo_url=plugin_dev_config.source_repo_url,
-                        source_ref=fallback_ref,
-                        resolved_commit=cached_commit,
-                        channel=channel,
-                        release=fallback_ref,
-                    )
-                    return source_dir, f"参考源码更新失败，继续使用现有缓存: {cached_commit[:12]} ({e})"
-                except Exception:
-                    return source_dir, f"参考源码更新失败，继续使用现有缓存: {e}"
+            if PLUGIN_DEV_NEKRO_SOURCE_DIR.exists():
+                update_source_lock_info(
+                    repo_url="",
+                    source_ref="cached-runtime",
+                    resolved_commit="",
+                    channel="preview",
+                    release="cached-runtime",
+                    source_origin="cached_runtime",
+                    source_path=str(PLUGIN_DEV_NEKRO_SOURCE_DIR.resolve()),
+                    source_dirty=True,
+                    notes=f"本地运行环境源码快照刷新失败，继续使用已有缓存: {e}",
+                )
+                return PLUGIN_DEV_NEKRO_SOURCE_DIR, f"参考源码快照刷新失败，继续使用已有缓存: {e}"
+            update_source_lock_info(
+                repo_url="",
+                source_ref="unavailable",
+                resolved_commit="",
+                channel="preview",
+                release="",
+                source_origin="unavailable",
+                source_path="",
+                source_dirty=False,
+                notes=f"参考源码不可用: {e}",
+            )
             return None, f"参考源码准备失败，继续生成: {e}"
 
     @staticmethod
@@ -331,7 +400,7 @@ class PluginDevSandboxService:
 
         skills_dir = PLUGIN_DEV_WORKSPACE_DIR / ".claude_home" / "skills" / _PLUGIN_DEV_SKILL_NAME
         skills_dir.mkdir(parents=True, exist_ok=True)
-        (skills_dir / "SKILL.md").write_text(_PLUGIN_DEV_SKILL, encoding="utf-8")
+        (skills_dir / "SKILL.md").write_text(_load_plugin_dev_skill(), encoding="utf-8")
         (PLUGIN_DEV_WORKSPACE_DIR / ".claude_home").chmod(0o777)
 
     @staticmethod
@@ -404,6 +473,7 @@ class PluginDevSandboxService:
         workspace_host_dir = str(PLUGIN_DEV_WORKSPACE_DIR.resolve())
         claude_home_host_dir = str((PLUGIN_DEV_WORKSPACE_DIR / ".claude_home").resolve())
         host_tz = _get_host_timezone()
+        internal_api_base = f"{config.SANDBOX_CHAT_API_URL.rstrip('/')}/internal/plugin-dev"
 
         binds = [
             f"{workspace_host_dir}:{CONTAINER_WORKSPACE_PATH}:rw",
@@ -431,6 +501,7 @@ class PluginDevSandboxService:
                 "RUNTIME_POLICY=agent",
                 "SKIP_PERMISSIONS=true",
                 f"INTERNAL_API_TOKEN={state.sandbox_api_token}",
+                f"NEKRO_PLUGIN_DEV_INTERNAL_API_BASE={internal_api_base}",
                 f"PORT={config.CC_SANDBOX_INTERNAL_PORT}",
                 "HOST=0.0.0.0",
                 f"TZ={host_tz}",
@@ -511,6 +582,22 @@ class PluginDevSandboxService:
         return f"{CONTAINER_WORKSPACE_PATH}/default/{relative_path.as_posix()}"
 
     @staticmethod
+    def resolve_workspace_host_path(container_path: str) -> Path:
+        workspace_prefix = f"{CONTAINER_WORKSPACE_PATH}/"
+        normalized = container_path.strip()
+        if not normalized.startswith(workspace_prefix):
+            raise ValidationError(reason=f"不是插件开发沙盒工作区路径: {container_path}")
+        relative_path = Path(normalized.removeprefix(workspace_prefix))
+        host_path = PLUGIN_DEV_WORKSPACE_DIR / relative_path
+        workspace_root = PLUGIN_DEV_WORKSPACE_DIR.resolve()
+        resolved_path = host_path.resolve()
+        try:
+            resolved_path.relative_to(workspace_root)
+        except ValueError as e:
+            raise ValidationError(reason=f"插件工作副本路径越界: {container_path}") from e
+        return resolved_path
+
+    @staticmethod
     async def cancel_current_task() -> bool:
         sandbox_status, state = await PluginDevSandboxService.status()
         if sandbox_status != "running" or state is None:
@@ -519,17 +606,49 @@ class PluginDevSandboxService:
         return await client.force_cancel_current_task(workspace_id="default")
 
     @staticmethod
+    async def get_available_tools(*, refresh: bool = False) -> list[str]:
+        state = await PluginDevSandboxService.start()
+        client = CCSandboxClient(state, timeout=60.0)
+        if refresh:
+            return await client.refresh_tools()
+        return await client.get_tools()
+
+    @staticmethod
+    async def inspect_runtime(*, refresh_tools: bool = False) -> PluginDevSandboxRuntimeInfo:
+        state = await PluginDevSandboxService.start()
+        client = CCSandboxClient(state, timeout=60.0)
+        healthy = await client.health_check()
+        tools = []
+        if healthy:
+            tools = await client.refresh_tools() if refresh_tools else await client.get_tools()
+        preset_info = PluginDevSandboxService._describe_plugin_dev_preset()
+        return PluginDevSandboxRuntimeInfo(
+            container_name=state.container_name or "",
+            container_id=state.container_id or "",
+            api_endpoint=state.api_endpoint,
+            healthy=healthy,
+            preset_id=preset_info["preset_id"],
+            preset_name=preset_info["preset_name"],
+            model_type=preset_info["model_type"],
+            model_label=preset_info["model_label"],
+            tools=tools,
+        )
+
+    @staticmethod
     async def stream_generate(prompt: str) -> AsyncGenerator[str | dict, None]:
         state = await PluginDevSandboxService.start()
         client = CCSandboxClient(state, timeout=600.0)
         if not await client.health_check():
             raise OperationFailedError(operation="启动插件开发沙盒", detail="沙盒 API 健康检查失败")
+        internal_api_base = f"{config.SANDBOX_CHAT_API_URL.rstrip('/')}/internal/plugin-dev"
         try:
             async for chunk in client.stream_message(
                 prompt,
                 workspace_id="default",
                 source_chat_key="__plugin_dev__",
                 env_vars={
+                    "INTERNAL_API_TOKEN": state.sandbox_api_token,
+                    "NEKRO_PLUGIN_DEV_INTERNAL_API_BASE": internal_api_base,
                     "NEKRO_PLUGIN_DEV_VERSION": get_version_info().model_dump_json(),
                     "NEKRO_PLUGIN_DEV_WORKSPACE": str(PLUGIN_DEV_WORKSPACE_DIR),
                 },

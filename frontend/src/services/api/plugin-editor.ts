@@ -1,6 +1,8 @@
 import axios from './axios'
 import { createEventStream } from './utils/stream'
 
+const encodePathParam = (filePath: string): string => filePath.split('/').map(encodeURIComponent).join('/')
+
 export interface PluginEditorApi {
   // 获取插件文件列表
   getPluginFiles: () => Promise<string[]>
@@ -42,7 +44,7 @@ export const pluginEditorApi: PluginEditorApi = {
   // 获取插件文件内容
   getPluginFileContent: async (filePath: string): Promise<string | null> => {
     try {
-      const response = await axios.get<{ content: string }>(`/plugin-editor/file/${filePath}`)
+      const response = await axios.get<{ content: string }>(`/plugin-editor/file/${encodePathParam(filePath)}`)
       return response.data.content
     } catch (_error) {
       return null
@@ -52,7 +54,7 @@ export const pluginEditorApi: PluginEditorApi = {
   // 保存插件文件
   savePluginFile: async (filePath: string, content: string): Promise<boolean> => {
     try {
-      const response = await axios.post<{ ok: boolean }>(`/plugin-editor/file/${filePath}`, content, {
+      const response = await axios.post<{ ok: boolean }>(`/plugin-editor/file/${encodePathParam(filePath)}`, content, {
         headers: {
           'Content-Type': 'text/plain',
         },
@@ -66,7 +68,7 @@ export const pluginEditorApi: PluginEditorApi = {
   // 删除插件文件
   deletePluginFile: async (filePath: string): Promise<boolean> => {
     try {
-      const response = await axios.delete<{ ok: boolean }>(`/plugin-editor/files/${filePath}`)
+      const response = await axios.delete<{ ok: boolean }>(`/plugin-editor/files/${encodePathParam(filePath)}`)
       return response.data.ok
     } catch (_error) {
       return false
