@@ -11,12 +11,14 @@ from sse_starlette.sse import EventSourceResponse
 
 from nekro_agent.models.db_user import DBUser
 from nekro_agent.schemas.errors import NotFoundError, UnauthorizedError, ValidationError
+from nekro_agent.schemas.plugin_check import PluginCheckReport
 from nekro_agent.schemas.plugin_dev import (
     PluginDevApplyResponse,
     PluginDevCcModelPresetUpdate,
     PluginDevGenerateRequest,
     PluginDevGenerateResponse,
     PluginDevHistoryResponse,
+    PluginDevInternalCheckRequest,
     PluginDevInternalFileResponse,
     PluginDevInternalProposalRequest,
     PluginDevProposalResponse,
@@ -35,6 +37,7 @@ from nekro_agent.services.plugin_dev.host_file_gateway import (
     sha256_text,
 )
 from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
+from nekro_agent.services.plugin_dev.self_check import run_plugin_self_check
 from nekro_agent.services.plugin_dev.tasks import (
     apply_proposal,
     cancel_task,
@@ -155,6 +158,21 @@ async def create_internal_plugin_proposal(
         after=body.content,
         summary=body.summary.strip() or "由插件开发沙盒创建写入提案",
     )
+
+
+@internal_router.post(
+    "/check",
+    summary="内部接口：执行插件自检",
+    response_model=PluginCheckReport,
+    dependencies=[Depends(require_plugin_dev_internal_token)],
+)
+async def check_internal_plugin_candidate(
+    body: PluginDevInternalCheckRequest,
+) -> PluginCheckReport:
+    resolve_plugin_file(body.file_path)
+    if len(body.content.encode("utf-8")) > _MAX_INTERNAL_PROPOSAL_BYTES:
+        raise ValidationError(reason="自检候选内容过大")
+    return await run_plugin_self_check(body.file_path, body.content, level=body.level)
 
 
 @router.get("/status", summary="获取插件生成沙盒状态", response_model=PluginDevStatusResponse)
