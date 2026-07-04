@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-PluginCheckLevel = Literal["load", "smoke", "strict"]
+PluginCheckLevel = Literal["static", "load", "smoke", "strict"]
 
 
 class PluginCheckFailure(BaseModel):

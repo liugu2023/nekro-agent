@@ -122,6 +122,22 @@ def _manifest_path(file_path: str) -> Path:
     return _history_dir(file_path) / "manifest.json"
 
 
+_MAX_VERSIONS_PER_FILE = 50
+
+
+def _prune_versions(history_dir: Path, versions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(versions) <= _MAX_VERSIONS_PER_FILE:
+        return versions
+    pruned, kept = versions[:-_MAX_VERSIONS_PER_FILE], versions[-_MAX_VERSIONS_PER_FILE:]
+    for item in pruned:
+        old_version_id = str(item.get("version_id") or "")
+        if not old_version_id:
+            continue
+        for suffix in ("before", "after"):
+            (history_dir / f"{old_version_id}-{suffix}.py").unlink(missing_ok=True)
+    return kept
+
+
 def get_history(file_path: str) -> PluginDevHistoryResponse:
     manifest = _read_json(
         _manifest_path(file_path),
@@ -168,7 +184,7 @@ def record_version(
     manifest = _read_json(manifest_path, {"file_path": file_path, "current_version_id": None, "versions": []})
     versions = list(manifest.get("versions", []))
     versions.append(item.model_dump())
-    manifest["versions"] = versions
+    manifest["versions"] = _prune_versions(history_dir, versions)
     manifest["current_version_id"] = version_id
     _write_json(manifest_path, manifest)
     return version_id

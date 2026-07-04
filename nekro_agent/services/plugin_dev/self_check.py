@@ -17,6 +17,7 @@ from nekro_agent.services.plugin_dev.paths import PLUGIN_DEV_DIR
 logger = get_sub_logger("plugin_dev_self_check")
 
 _PLUGIN_CHECK_TIMEOUT_SECONDS = 90
+_PLUGIN_STATIC_CHECK_TIMEOUT_SECONDS = 60
 _PLUGIN_CHECK_IGNORE_PATTERNS = ("__pycache__", "*.pyc", "*.pyo")
 
 
@@ -67,8 +68,10 @@ async def run_plugin_self_check(
     code: str,
     *,
     level: str = "smoke",
-    timeout_seconds: int = _PLUGIN_CHECK_TIMEOUT_SECONDS,
+    timeout_seconds: int | None = None,
 ) -> PluginCheckReport:
+    if timeout_seconds is None:
+        timeout_seconds = _PLUGIN_STATIC_CHECK_TIMEOUT_SECONDS if level == "static" else _PLUGIN_CHECK_TIMEOUT_SECONDS
     repo_root = Path(__file__).resolve().parents[3]
     cli_script_path = repo_root / "run_nekro_cli.py"
     if not cli_script_path.exists():

@@ -23,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     plugin_check = plugin_subparsers.add_parser("check", help="在隔离环境中自检插件")
     plugin_check.add_argument("path", help="待检查的插件文件或包目录")
-    plugin_check.add_argument("--level", choices=("load", "smoke", "strict"), default="smoke")
+    plugin_check.add_argument("--level", choices=("static", "load", "smoke", "strict"), default="smoke")
     plugin_check.add_argument("--timeout", type=int, default=30, help="子进程检查超时时间（秒）")
     plugin_check.add_argument("--json", action="store_true", help="输出 JSON 结果")
     plugin_check.add_argument("--report-file", help="将 JSON 检查报告写入指定文件")
@@ -31,7 +31,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     worker_parser = subparsers.add_parser("__plugin-check-worker")
     worker_parser.add_argument("path")
-    worker_parser.add_argument("--level", choices=("load", "smoke", "strict"), default="smoke")
+    worker_parser.add_argument("--level", choices=("static", "load", "smoke", "strict"), default="smoke")
     worker_parser.add_argument("--report-file", required=True)
 
     return parser

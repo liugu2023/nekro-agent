@@ -39,7 +39,7 @@ dependencies = [
     "tzlocal>=5.2,<6.0",
     "aiosmtplib>=2.0.0,<3.0.0",
     "aiofiles>=24.1.0,<25.0.0",
-    "python-magic>=0.4.27,<1.0.0",
+    "python-magic>=0.4.27,<1.0.0; sys_platform != 'win32'",
     "python-magic-bin>=0.4.14,<1.0.0; sys_platform == 'win32'",
     "psutil>=7.0.0,<8.0.0",
     "gitpython>=3.1.44,<4.0.0",

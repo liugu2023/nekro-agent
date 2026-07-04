@@ -5,6 +5,7 @@ import random
 import secrets
 import shlex
 import shutil
+import socket
 import tomllib
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
@@ -83,9 +84,10 @@ _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 - `/workspace/nekro-agent-source` 是只读参考源码，不得修改。
 - 不要自行联网拉取 GitHub main、latest 或最新 tag 作为参考；如果版本信息标记 `source_dirty`，仍以该本地快照为准。
 - 任务会提供插件工作副本路径和插件自检命令。候选代码必须先写入工作副本，再由你在 CC 沙盒里运行该自检命令；只在回复里粘贴代码不算交付。
+- 自检命令执行的是静态检查（语法、导入可用性、插件结构），不会运行插件代码；完整加载检查在用户确认应用提案时由后端执行。
 - 只有 CC 沙盒自检通过后，才能调用内部网关创建 proposal；不要在自检前创建 proposal。如果无法调用网关，也必须确保工作副本里已经是最终候选代码。
 - 如需读取真实插件文件或提交写入提案，使用 `NEKRO_PLUGIN_DEV_INTERNAL_API_BASE`，请求头带 `X-Internal-API-Token: $INTERNAL_API_TOKEN`。
-- 内部网关提供版本、文件列表、文件读取、自检和 proposal 创建能力，真实写入仍由 NekroAgent 后端和用户确认完成。
+- 内部网关提供版本、文件列表、文件读取、静态自检和 proposal 创建能力，真实写入仍由 NekroAgent 后端和用户确认完成。
 
 ## 交付要求
 
@@ -115,7 +117,7 @@ def _candidate_bases() -> list[str]:
 def _fallback_report(candidate_path: str, detail: str) -> dict:
     return {
         "ok": False,
-        "level": "smoke",
+        "level": "static",
         "candidate_path": candidate_path,
         "checks": [
             {
@@ -140,7 +142,7 @@ def main() -> int:
     candidate_path = sys.argv[1]
     file_path = sys.argv[2]
     task_id = sys.argv[3]
-    level = sys.argv[4] if len(sys.argv) > 4 else "smoke"
+    level = sys.argv[4] if len(sys.argv) > 4 else "static"
     token = os.environ.get("INTERNAL_API_TOKEN", "")
 
     try:
@@ -529,8 +531,15 @@ class PluginDevSandboxService:
 
         for _ in range(100):
             port = random.randint(config.CC_SANDBOX_PORT_RANGE_START, config.CC_SANDBOX_PORT_RANGE_END)
-            if port not in used_ports:
-                return port
+            if port in used_ports:
+                continue
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.bind(("127.0.0.1", port))
+            except OSError:
+                used_ports.add(port)
+                continue
+            return port
         raise RuntimeError("无法在端口段内找到空闲端口")
 
     @staticmethod
@@ -606,10 +615,11 @@ class PluginDevSandboxService:
             else:
                 return state
 
-        if state.status == "active" and await PluginDevSandboxService._container_running(state.container_name):
-            return state
-
         await PluginDevSandboxService._remove_container(state.container_name)
+
+        # 每次新建容器时轮换内部网关 token，旧容器（及其可能泄漏的 token）随之失效
+        state.sandbox_api_token = secrets.token_urlsafe(32)
+        PluginDevSandboxService._save_state(state)
 
         image = f"{config.CC_SANDBOX_IMAGE}:{config.CC_SANDBOX_IMAGE_TAG}"
         if not await SandboxContainerManager.check_image_exists(image):
@@ -719,7 +729,7 @@ class PluginDevSandboxService:
         PluginDevSandboxService._write_runtime_files()
 
     @staticmethod
-    def build_self_check_command(candidate_path: str, file_path: str, task_id: str, level: str = "smoke") -> str:
+    def build_self_check_command(candidate_path: str, file_path: str, task_id: str, level: str = "static") -> str:
         helper_path = f"{CONTAINER_WORKSPACE_PATH}/default/plugin_dev_check.py"
         args = [
             "python",

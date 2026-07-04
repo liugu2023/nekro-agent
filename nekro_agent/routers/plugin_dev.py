@@ -46,7 +46,9 @@ from nekro_agent.services.plugin_dev.tasks import (
     discard_proposal,
     get_proposal,
     get_task,
+    get_task_file_mtime,
     get_task_runtime_snapshot,
+    get_task_status,
 )
 from nekro_agent.services.plugin_dev.versioning import get_history, get_version_info, rollback, update_version_info
 from nekro_agent.services.runtime_state import is_shutting_down
@@ -78,7 +80,7 @@ async def require_plugin_dev_internal_token(
         raise UnauthorizedError()
 
 
-def _build_status_response(sandbox_status: str, workspace) -> PluginDevStatusResponse:
+def _build_status_response(sandbox_status: str) -> PluginDevStatusResponse:
     from nekro_agent.core.cc_model_presets import cc_presets_store
 
     preset_id = None
@@ -147,6 +149,9 @@ async def create_internal_plugin_proposal(
     resolve_plugin_file(body.file_path)
     if len(body.content.encode("utf-8")) > _MAX_INTERNAL_PROPOSAL_BYTES:
         raise ValidationError(reason="写入提案内容过大")
+    task_status = get_task_status(body.task_id)
+    if task_status in _TERMINAL_TASK_STATUSES:
+        raise ValidationError(reason=f"任务 {body.task_id} 已结束（{task_status}），不能再创建写入提案")
     try:
         before = read_plugin_file(body.file_path)
     except NotFoundError:
@@ -162,7 +167,7 @@ async def create_internal_plugin_proposal(
 
 @internal_router.post(
     "/check",
-    summary="内部接口：执行插件自检",
+    summary="内部接口：执行插件自检（仅静态检查）",
     response_model=PluginCheckReport,
     dependencies=[Depends(require_plugin_dev_internal_token)],
 )
@@ -172,7 +177,12 @@ async def check_internal_plugin_candidate(
     resolve_plugin_file(body.file_path)
     if len(body.content.encode("utf-8")) > _MAX_INTERNAL_PROPOSAL_BYTES:
         raise ValidationError(reason="自检候选内容过大")
-    return await run_plugin_self_check(body.file_path, body.content, level=body.level)
+    # 安全约束：内部网关自检固定为 static 级别，绝不执行沙盒提交的候选代码；
+    # 执行型检查（smoke）只在用户确认应用提案时进行。
+    report = await run_plugin_self_check(body.file_path, body.content, level="static")
+    if body.level != "static":
+        report.warnings.append(f"内部网关自检固定为 static 级别，已忽略请求的 {body.level} 级别；执行型检查将在用户应用提案时进行")
+    return report
 
 
 @router.get("/status", summary="获取插件生成沙盒状态", response_model=PluginDevStatusResponse)
@@ -180,8 +190,8 @@ async def check_internal_plugin_candidate(
 async def get_plugin_dev_status(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevStatusResponse:
-    status, workspace = await PluginDevSandboxService.status()
-    return _build_status_response(status, workspace)
+    status, _ = await PluginDevSandboxService.status()
+    return _build_status_response(status)
 
 
 @router.post("/start", summary="启动插件生成沙盒", response_model=PluginDevStatusResponse)
@@ -190,7 +200,7 @@ async def start_plugin_dev_sandbox(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevStatusResponse:
     workspace = await PluginDevSandboxService.start()
-    return _build_status_response("running" if workspace.status == "active" else "stopped", workspace)
+    return _build_status_response("running" if workspace.status == "active" else "stopped")
 
 
 @router.post("/stop", summary="停止插件生成沙盒", response_model=PluginDevStatusResponse)
@@ -199,7 +209,7 @@ async def stop_plugin_dev_sandbox(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevStatusResponse:
     workspace = await PluginDevSandboxService.stop()
-    return _build_status_response("running" if workspace.status == "active" else "stopped", workspace)
+    return _build_status_response("running" if workspace.status == "active" else "stopped")
 
 
 @router.put("/cc-model-preset", summary="设置插件开发沙盒 CC 模型组", response_model=PluginDevStatusResponse)
@@ -216,8 +226,8 @@ async def set_plugin_dev_cc_model_preset(
         raise NotFoundError(resource=f"CC 模型组 {body.cc_model_preset_id}")
     update_plugin_dev_config(cc_model_preset_id=body.cc_model_preset_id)
     PluginDevSandboxService.sync_settings()
-    status, sandbox_state = await PluginDevSandboxService.status()
-    return _build_status_response(status, sandbox_state)
+    status, _ = await PluginDevSandboxService.status()
+    return _build_status_response(status)
 
 
 @router.get("/version", summary="获取插件开发版本信息", response_model=PluginDevVersionInfo)
@@ -267,9 +277,17 @@ async def stream_plugin_dev_task(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         last_payload = ""
+        last_mtime = -1.0
         while not is_shutting_down():
             if await request.is_disconnected():
                 return
+
+            # 任务文件未变化时跳过读取与序列化，降低轮询开销
+            current_mtime = get_task_file_mtime(task_id)
+            if current_mtime == last_mtime:
+                await asyncio.sleep(0.8)
+                continue
+            last_mtime = current_mtime
 
             task = get_task(task_id)
             payload = json.dumps(

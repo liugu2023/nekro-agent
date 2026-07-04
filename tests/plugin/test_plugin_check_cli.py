@@ -289,3 +289,136 @@ def test_plugin_check_cli_strict_reports_duplicate_method_names(tmp_path: Path):
     report = json.loads(completed.stdout)
     assert report["ok"] is False
     assert any(check["id"] == "duplicate_method_names" and not check["ok"] for check in report["checks"])
+
+
+def test_plugin_check_cli_static_level_does_not_execute_candidate(tmp_path: Path):
+    marker_file = tmp_path / "executed.marker"
+    plugin_file = tmp_path / "static_demo.py"
+    plugin_file.write_text(
+        "\n".join(
+            [
+                "from pathlib import Path",
+                "",
+                "from nekro_agent.api.plugin import NekroPlugin",
+                "",
+                'Path(__file__).with_name("executed.marker").write_text("executed", encoding="utf-8")',
+                "",
+                "plugin = NekroPlugin(",
+                '    name="StaticDemo",',
+                '    module_name="static_demo",',
+                '    description="static demo",',
+                '    version="0.1.0",',
+                '    author="Tester",',
+                '    url="https://example.com",',
+                ")",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(CLI_PATH), "plugin", "check", str(plugin_file), "--level", "static", "--json"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    report = json.loads(completed.stdout)
+    assert report["ok"] is True
+    assert report["level"] == "static"
+    check_ids = {check["id"] for check in report["checks"]}
+    assert {"static_syntax", "static_imports", "static_plugin_instance"} <= check_ids
+    assert not marker_file.exists(), "static 级别检查不允许执行候选插件代码"
+
+
+def test_plugin_check_cli_static_level_reports_static_issues(tmp_path: Path):
+    hallucinated_import_file = tmp_path / "hallucinated_import.py"
+    hallucinated_import_file.write_text(
+        "\n".join(
+            [
+                "from nekro_agent.api.plugin import NekroPlugin, DefinitelyNotARealSymbol",
+                "",
+                "plugin = NekroPlugin(",
+                '    name="Broken",',
+                '    module_name="hallucinated_import",',
+                '    description="broken",',
+                '    version="0.1.0",',
+                '    author="Tester",',
+                '    url="https://example.com",',
+                ")",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(CLI_PATH), "plugin", "check", str(hallucinated_import_file), "--level", "static", "--json"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    report = json.loads(completed.stdout)
+    assert report["ok"] is False
+    assert any(check["id"] == "static_imports" and not check["ok"] for check in report["checks"])
+    assert any("DefinitelyNotARealSymbol" in (check.get("error") or "") for check in report["checks"])
+
+    missing_plugin_file = tmp_path / "missing_plugin_instance.py"
+    missing_plugin_file.write_text("value = 1\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [sys.executable, str(CLI_PATH), "plugin", "check", str(missing_plugin_file), "--level", "static", "--json"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    report = json.loads(completed.stdout)
+    assert report["ok"] is False
+    assert any(check["id"] == "static_plugin_instance" and not check["ok"] for check in report["checks"])
+
+    sync_mount_file = tmp_path / "sync_mount_plugin.py"
+    sync_mount_file.write_text(
+        "\n".join(
+            [
+                "from nekro_agent.api.plugin import NekroPlugin, SandboxMethodType",
+                "",
+                "plugin = NekroPlugin(",
+                '    name="SyncMount",',
+                '    module_name="sync_mount_plugin",',
+                '    description="sync mount demo",',
+                '    version="0.1.0",',
+                '    author="Tester",',
+                '    url="https://example.com",',
+                ")",
+                "",
+                '@plugin.mount_sandbox_method(SandboxMethodType.TOOL, "同步方法")',
+                "def sync_method(_ctx):",
+                '    return "ok"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(CLI_PATH), "plugin", "check", str(sync_mount_file), "--level", "static", "--json"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    report = json.loads(completed.stdout)
+    assert report["ok"] is False
+    assert any(check["id"] == "static_async_contracts" and not check["ok"] for check in report["checks"])
+    assert any("sync_method" in (check.get("error") or "") for check in report["checks"])

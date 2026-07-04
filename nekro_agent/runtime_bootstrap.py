@@ -174,6 +174,18 @@ def bootstrap_nonebot_plugin() -> Any:
         logger.info("Knowledge base collection initialized")
 
         await _recover_stale_kb_tasks()
+
+        try:
+            from nekro_agent.services.plugin_dev.tasks import (
+                cleanup_plugin_dev_artifacts,
+                recover_stale_plugin_dev_tasks,
+            )
+
+            recover_stale_plugin_dev_tasks()
+            cleanup_plugin_dev_artifacts()
+        except Exception as e:
+            logger.warning(f"回收插件开发任务状态失败（非致命）: {e}")
+
         start_telemetry_task()
 
         async def _recover_cc_pending() -> None:

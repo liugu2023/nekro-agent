@@ -33,7 +33,7 @@ export interface PluginDevVersionInfo {
 
 export interface PluginDevStatusResponse {
   enabled: boolean
-  sandbox_status: 'not_implemented' | 'stopped' | 'running' | 'failed'
+  sandbox_status: 'stopped' | 'running' | 'failed'
   active_task_id: string | null
   queue_length: number
   cc_model_preset_id: number | null
@@ -78,6 +78,7 @@ export interface PluginDevProposalResponse {
   result_code: string
   summary: string
   created_at: string
+  before_sha256?: string
 }
 
 export interface PluginDevApplyResponse {

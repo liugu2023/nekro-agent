@@ -43,7 +43,7 @@ class PluginDevVersionInfo(BaseModel):
 
 class PluginDevStatusResponse(BaseModel):
     enabled: bool = True
-    sandbox_status: Literal["not_implemented", "stopped", "running", "failed"] = "not_implemented"
+    sandbox_status: Literal["stopped", "running", "failed"] = "stopped"
     active_task_id: str | None = None
     queue_length: int = 0
     cc_model_preset_id: int | None = None
@@ -105,7 +105,7 @@ class PluginDevInternalCheckRequest(BaseModel):
     file_path: str
     content: str = Field(..., min_length=1)
     task_id: str = Field(default="plugin-dev-internal", min_length=1)
-    level: Literal["load", "smoke", "strict"] = "smoke"
+    level: Literal["static", "load", "smoke", "strict"] = "static"
 
 
 class PluginDevGenerateResponse(BaseModel):
@@ -136,6 +136,7 @@ class PluginDevProposalResponse(BaseModel):
     result_code: str
     summary: str
     created_at: str
+    before_sha256: str = ""
 
 
 class PluginDevApplyResponse(BaseModel):
