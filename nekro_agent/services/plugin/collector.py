@@ -167,23 +167,62 @@ class PluginCollector:
             except Exception as e:
                 logger.exception(f"加载云端插件失败: {item}: {e}")
 
+    @staticmethod
+    def normalize_plugin_module_name(module_name: str) -> str:
+        """把文件路径形态的入参规范化为顶层插件模块名
+
+        兼容 `demo`、`demo.py`、`demo.py.disabled`、`mypkg/__init__.py`、
+        `mypkg/plugin.py`、`mypkg\\sub\\mod.py` 等形态；包内文件解析为
+        顶层包名（插件的加载单位是插件目录下的顶层条目）。
+
+        Raises:
+            ValueError: 当解析结果为空或包含路径穿越段时抛出
+        """
+        normalized = module_name.strip().replace("\\", "/").strip("/")
+        if normalized.endswith(".disabled"):
+            normalized = normalized[: -len(".disabled")]
+        if normalized.endswith(".py"):
+            normalized = normalized[: -len(".py")]
+        top_name = normalized.split("/")[0].strip()
+        if not top_name or top_name in {".", ".."}:
+            raise ValueError(f"插件模块名 `{module_name}` 非法")
+        return top_name
+
+    def _pop_stale_plugin_modules(self, module_ref: str) -> None:
+        """从 sys.modules 与已加载模块记录中卸载插件模块及其全部子模块
+
+        包插件重载时若只弹出顶层模块，包内子模块仍指向旧代码，
+        `from .xxx import` 会拿到旧实现，因此必须按前缀整体弹出。
+
+        Args:
+            module_ref: 完整模块路径（如 `workdir.demo`）或顶层模块名（如 `demo`）
+        """
+        orig_mod = next(
+            (m for m in self.loaded_module_names if m == module_ref or m.endswith(f".{module_ref}")),
+            None,
+        )
+        if orig_mod is None:
+            logger.warning(f"未找到原始模块 {module_ref}，无法卸载旧模块")
+            return
+        self.loaded_module_names.discard(orig_mod)
+        stale_modules = [m for m in sys.modules if m == orig_mod or m.startswith(f"{orig_mod}.")]
+        for stale_module in stale_modules:
+            sys.modules.pop(stale_module, None)
+        if stale_modules:
+            logger.debug(f"已卸载旧插件模块: {', '.join(sorted(stale_modules))}")
+
     async def unload_plugin_by_module_name(self, module_name: str, scope: Literal["all", "package", "local"] = "all") -> None:
         """卸载指定插件
 
         Args:
-            module_name: 插件模块名
+            module_name: 插件模块名（兼容文件路径形态，包内文件解析为顶层包）
             scope: 卸载范围，可选值：all(所有)、package(仅云端插件)、local(仅本地插件)
         """
-        if module_name.endswith(".py"):
-            module_name = module_name[: -len(".py")]
-        if module_name.endswith("/__init__"):
-            module_name = module_name[: -len("/__init__")]
-        if "/" in module_name:
-            raise ValueError(f"插件模块名 `{module_name}` 不在合法的加载目录中")
+        fixed_module_name = self.normalize_plugin_module_name(module_name)
 
-        plugin = self.get_plugin_by_module_name(module_name)
+        plugin = self.get_plugin_by_module_name(fixed_module_name)
         if not plugin:
-            logger.warning(f"插件 `{module_name}` 不存在")
+            logger.warning(f"插件 `{fixed_module_name}` 不存在")
             return
 
         # 根据scope限制卸载范围
@@ -213,8 +252,7 @@ class PluginCollector:
         if plugin.key in self.loaded_plugins:
             del self.loaded_plugins[plugin.key]
 
-        if plugin.module_name in self.loaded_module_names:
-            self.loaded_module_names.remove(plugin.module_name)
+        self._pop_stale_plugin_modules(fixed_module_name)
 
         logger.info(f"插件 {plugin.name} 卸载完成")
 
@@ -231,37 +269,34 @@ class PluginCollector:
         return path.with_suffix(".py")
 
     async def reload_plugin_by_module_name(self, module_name: str, is_builtin: bool = False, is_package: bool = False):
-        """重新加载指定插件"""
-        fixed_module_name = module_name
-        if module_name.endswith(".py"):
-            fixed_module_name = module_name[: -len(".py")]
-        if module_name.endswith("/__init__.py"):
-            fixed_module_name = module_name[: -len("/__init__.py")]
-        if "/" in module_name:
-            raise ValueError(f"插件模块名 `{module_name}` 不在合法的加载目录中")
+        """重新加载指定插件
 
-        builtin_plugin_path = self.builtin_plugin_dir / module_name
-        workdir_plugin_path = self.workdir_plugin_dir / module_name
-        package_path = self.packages_dir / module_name
+        module_name 兼容文件路径形态（如 `demo.py`、`mypkg/plugin.py`、
+        `mypkg/__init__.py`）；包内文件会被解析为顶层包插件后整体重载。
+        """
+        fixed_module_name = self.normalize_plugin_module_name(module_name)
 
+        plugin_base_dirs = (self.builtin_plugin_dir, self.workdir_plugin_dir, self.packages_dir)
         exists_paths = [
-            self._to_load_path(p)
-            for p in [builtin_plugin_path, workdir_plugin_path, package_path]
-            if self._check_module_exists(p)
+            self._to_load_path(base_dir / fixed_module_name)
+            for base_dir in plugin_base_dirs
+            if self._check_module_exists(base_dir / fixed_module_name)
         ]
         if len(exists_paths) == 0:
-            raise ValueError(f"插件 `{module_name}` 不存在")
+            if any((base_dir / f"{fixed_module_name}.py.disabled").exists() for base_dir in plugin_base_dirs):
+                raise ValueError(f"插件 `{fixed_module_name}` 处于禁用状态（.py.disabled），请先启用插件后再重载")
+            raise ValueError(f"插件 `{fixed_module_name}` 不存在")
 
         if len(exists_paths) > 1:
             logger.warning(
-                f"在多个加载目录中发现了重复插件 `{module_name}`，将按照以下优先级加载：内置插件 > 工作目录插件 > 云端云端插件",
+                f"在多个加载目录中发现了重复插件 `{fixed_module_name}`，将按照以下优先级加载：内置插件 > 工作目录插件 > 云端插件",
             )
 
         real_path = exists_paths[0]
 
         loaded_plugin = self.get_plugin_by_module_name(fixed_module_name)
         if loaded_plugin:
-            logger.info(f"插件 `{module_name}` 已加载，正在重载...")
+            logger.info(f"插件 `{fixed_module_name}` 已加载，正在重载...")
             # 卸载插件命令
             if loaded_plugin._commands:  # noqa: SLF001
                 from nekro_agent.services.command.registry import command_registry
@@ -272,17 +307,8 @@ class PluginCollector:
                 logger.info(f"插件 {loaded_plugin.name} 清理完成")
             if loaded_plugin.key in self.loaded_plugins:
                 del self.loaded_plugins[loaded_plugin.key]
-            if loaded_plugin.module_name in self.loaded_module_names:
-                self.loaded_module_names.remove(loaded_plugin.module_name)
-            # 卸载旧插件模块，保证后续重新 import 执行最新代码
-            # 从 loaded_module_names 中找到原始模块路径
-            orig_mod = next((m for m in self.loaded_module_names if m.endswith(f".{fixed_module_name}")), None)
-            if orig_mod and orig_mod in sys.modules:
-                logger.debug(f"卸载旧插件模块 {orig_mod}")
-                sys.modules.pop(orig_mod, None)
-                self.loaded_module_names.discard(orig_mod)
-            else:
-                logger.warning(f"未找到原始模块 {fixed_module_name}，无法卸载旧模块")
+            # 卸载旧插件模块（含包内子模块），保证后续重新 import 执行最新代码
+            self._pop_stale_plugin_modules(fixed_module_name)
 
         # logger.debug(f"尝试加载插件: {real_path} 从 {fixed_module_name}")
         await self._try_load_plugin(real_path, is_builtin=is_builtin, is_package=is_package)
@@ -487,17 +513,8 @@ class PluginCollector:
             if loaded_plugin.cleanup_method:
                 await loaded_plugin.cleanup_method()
                 logger.info(f"插件 {loaded_plugin.name} 清理完成")
-            if loaded_plugin.module_name in self.loaded_module_names:
-                self.loaded_module_names.remove(loaded_plugin.module_name)
-            # 卸载旧插件模块，保证后续重新 import 执行最新代码
-            # 从 loaded_module_names 中找到原始模块路径
-            orig_mod = next((m for m in self.loaded_module_names if m.endswith(f".{module_path}")), None)
-            if orig_mod and orig_mod in sys.modules:
-                logger.debug(f"卸载旧插件模块 {orig_mod}")
-                sys.modules.pop(orig_mod, None)
-                self.loaded_module_names.discard(orig_mod)
-            else:
-                logger.warning(f"未找到原始模块 {module_path}，无法卸载旧模块")
+            # 卸载旧插件模块（含包内子模块），保证后续重新 import 执行最新代码
+            self._pop_stale_plugin_modules(module_path)
 
         if isinstance(plugin, NekroPlugin):
             # 直接设置内置插件标识
@@ -648,11 +665,27 @@ class PluginCollector:
     def get_plugin_by_module_name(self, module_name: str) -> Optional[NekroPlugin]:
         """根据模块名获取插件实例
 
+        优先精确匹配插件声明的 module_name；未命中时把入参按文件路径
+        规范化为顶层模块名，再按声明名与实际加载的模块路径尾段匹配
+        （插件声明的 module_name 可能与文件/目录名不一致）。
+
         Args:
-            module_name: 插件模块名
+            module_name: 插件模块名（兼容文件路径形态）
         """
         for plugin in self.loaded_plugins.values():
             if plugin.module_name == module_name:
+                return plugin
+
+        try:
+            normalized = self.normalize_plugin_module_name(module_name)
+        except ValueError:
+            return None
+        for plugin in self.loaded_plugins.values():
+            if plugin.module_name == normalized:
+                return plugin
+            module = getattr(plugin, "_module", None)
+            module_tail = str(getattr(module, "__name__", "")).rsplit(".", maxsplit=1)[-1]
+            if module_tail and module_tail == normalized:
                 return plugin
         return None
 

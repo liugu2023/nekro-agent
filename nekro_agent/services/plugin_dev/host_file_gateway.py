@@ -25,6 +25,12 @@ def sha256_text(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+def plugin_top_dir(file_path: str) -> str | None:
+    """返回包形式插件的顶层目录名；顶层单文件插件返回 None。"""
+    parts = Path(file_path).parts
+    return parts[0] if len(parts) > 1 else None
+
+
 def resolve_plugin_file(file_path: str, *, must_exist: bool = False) -> Path:
     if not file_path or file_path.strip() != file_path:
         raise ValidationError(reason="插件文件路径非法")

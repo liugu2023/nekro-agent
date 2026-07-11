@@ -28,30 +28,58 @@ def normalize_check_relative_path(file_path: str) -> Path:
     return relative_path
 
 
-def stage_plugin_candidate(file_path: str, code: str, stage_root: Path) -> Path:
-    source_path = resolve_plugin_file(file_path)
+def _write_staged_file(stage_root: Path, file_path: str, content: str) -> Path:
+    relative_path = normalize_check_relative_path(file_path)
+    target = stage_root / relative_path
+    resolved_target = target.resolve()
+    try:
+        resolved_target.relative_to(stage_root.resolve())
+    except ValueError as e:
+        raise ValidationError(reason=f"候选文件路径越界: {file_path}") from e
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return target
+
+
+def stage_plugin_candidate(
+    file_path: str,
+    code: str,
+    stage_root: Path,
+    extra_files: dict[str, str] | None = None,
+) -> Path:
+    """把候选文件集写入暂存目录，返回检查入口路径。
+
+    - 顶层单文件插件：入口为该文件。
+    - 包形式插件（file_path 含目录）：先拷贝真实插件目录的顶层包（若存在）提供
+      完整包上下文，再覆盖写入候选文件集；入口为暂存区的顶层包目录。
+    """
+    resolved_source = resolve_plugin_file(file_path)
     relative_path = normalize_check_relative_path(file_path)
     stage_root.mkdir(parents=True, exist_ok=True)
 
-    package_root = source_path.parent if (source_path.parent / "__init__.py").exists() else None
-    if package_root is not None:
-        target_dir = stage_root / relative_path.parent
-        if target_dir.exists():
-            if target_dir.is_dir():
-                shutil.rmtree(target_dir)
-            else:
-                target_dir.unlink()
-        if package_root.exists():
-            shutil.copytree(package_root, target_dir, ignore=shutil.ignore_patterns(*_PLUGIN_CHECK_IGNORE_PATTERNS))
-        else:
-            target_dir.mkdir(parents=True, exist_ok=True)
-        candidate_path = target_dir / relative_path.name
-    else:
-        candidate_path = stage_root / relative_path
-        candidate_path.parent.mkdir(parents=True, exist_ok=True)
+    top_dir = relative_path.parts[0] if len(relative_path.parts) > 1 else None
+    if top_dir is None:
+        candidate_entry = _write_staged_file(stage_root, file_path, code)
+        for extra_path, extra_content in (extra_files or {}).items():
+            _write_staged_file(stage_root, extra_path, extra_content)
+        return candidate_entry
 
-    candidate_path.write_text(code, encoding="utf-8")
-    return candidate_path
+    target_top = stage_root / top_dir
+    if target_top.exists():
+        if target_top.is_dir():
+            shutil.rmtree(target_top)
+        else:
+            target_top.unlink()
+    real_top = resolved_source.parents[len(relative_path.parts) - 2]
+    if real_top.is_dir():
+        shutil.copytree(real_top, target_top, ignore=shutil.ignore_patterns(*_PLUGIN_CHECK_IGNORE_PATTERNS))
+    else:
+        target_top.mkdir(parents=True, exist_ok=True)
+
+    _write_staged_file(stage_root, file_path, code)
+    for extra_path, extra_content in (extra_files or {}).items():
+        _write_staged_file(stage_root, extra_path, extra_content)
+    return target_top
 
 
 def summarize_plugin_check(report: PluginCheckReport) -> str:
@@ -67,6 +95,7 @@ async def run_plugin_self_check(
     file_path: str,
     code: str,
     *,
+    extra_files: dict[str, str] | None = None,
     level: str = "smoke",
     timeout_seconds: int | None = None,
 ) -> PluginCheckReport:
@@ -81,7 +110,7 @@ async def run_plugin_self_check(
     with tempfile.TemporaryDirectory(prefix="plugin-dev-self-check-", dir=PLUGIN_DEV_DIR) as temp_root_str:
         temp_root = Path(temp_root_str)
         candidate_root = temp_root / "candidate"
-        candidate_path = stage_plugin_candidate(file_path, code, candidate_root)
+        candidate_path = stage_plugin_candidate(file_path, code, candidate_root, extra_files=extra_files)
         report_file = temp_root / "plugin_check_report.json"
         runtime_data_dir = temp_root / "runtime_data"
 

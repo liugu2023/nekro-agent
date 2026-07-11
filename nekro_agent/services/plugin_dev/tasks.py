@@ -11,8 +11,14 @@ from typing import Any
 from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.schemas.errors import NotFoundError, ValidationError
 from nekro_agent.schemas.plugin_check import PluginCheckReport
-from nekro_agent.schemas.plugin_dev import PluginDevGenerateRequest, PluginDevProposalResponse, PluginDevTaskResponse
+from nekro_agent.schemas.plugin_dev import (
+    PluginDevGenerateRequest,
+    PluginDevProposalFile,
+    PluginDevProposalResponse,
+    PluginDevTaskResponse,
+)
 from nekro_agent.services.plugin_dev.host_file_gateway import (
+    plugin_top_dir,
     read_plugin_file,
     resolve_plugin_file,
     sha256_text,
@@ -20,7 +26,11 @@ from nekro_agent.services.plugin_dev.host_file_gateway import (
 )
 from nekro_agent.services.plugin_dev.paths import PLUGIN_DEV_PROPOSAL_DIR, PLUGIN_DEV_TASK_DIR
 from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
-from nekro_agent.services.plugin_dev.self_check import run_plugin_self_check, summarize_plugin_check
+from nekro_agent.services.plugin_dev.self_check import (
+    normalize_check_relative_path,
+    run_plugin_self_check,
+    summarize_plugin_check,
+)
 from nekro_agent.services.plugin_dev.versioning import get_version_info, record_version, utc_now_iso
 
 logger = get_sub_logger("plugin_dev_tasks")
@@ -397,13 +407,73 @@ def _discard_other_pending_proposals(task_id: str, keep_proposal_id: str | None)
     return discarded
 
 
-def _read_changed_workspace_candidate(candidate_path: Path, rejected_codes: set[str]) -> str | None:
-    if not candidate_path.exists() or not candidate_path.is_file():
-        return None
-    candidate_code = candidate_path.read_text(encoding="utf-8")
-    if candidate_code in rejected_codes:
-        return None
-    return candidate_code
+def _snapshot_workspace_tree(root: Path) -> dict[str, str]:
+    """收集工作副本目录下全部 .py 文件内容，键为相对 root 的 POSIX 路径。"""
+    tree: dict[str, str] = {}
+    if not root.exists():
+        return tree
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts or not path.is_file():
+            continue
+        try:
+            tree[path.relative_to(root).as_posix()] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return tree
+
+
+def _primary_candidate_path(file_path: str) -> str:
+    return normalize_check_relative_path(file_path).as_posix()
+
+
+def _is_candidate_path_allowed(candidate_path: str, primary_file_path: str) -> bool:
+    """单文件任务只允许主文件本身；包任务允许同一顶层目录下的文件。"""
+    top_dir = plugin_top_dir(primary_file_path)
+    if top_dir is None:
+        return candidate_path == _primary_candidate_path(primary_file_path)
+    return candidate_path.startswith(f"{top_dir}/")
+
+
+def _collect_candidate_files(
+    current_tree: dict[str, str],
+    initial_tree: dict[str, str],
+    primary_file_path: str,
+) -> tuple[dict[str, str], list[str], bool]:
+    """从工作副本树提取候选文件集。
+
+    返回 (候选完整文件集, 越界被忽略的文件, 相对初始状态是否有变化)。
+    """
+    candidate_files: dict[str, str] = {}
+    ignored: list[str] = []
+    changed = False
+    for rel_path, content in current_tree.items():
+        if not _is_candidate_path_allowed(rel_path, primary_file_path):
+            if initial_tree.get(rel_path) != content:
+                ignored.append(rel_path)
+            continue
+        candidate_files[rel_path] = content
+        if initial_tree.get(rel_path) != content:
+            changed = True
+    return candidate_files, ignored, changed
+
+
+def _candidate_signature(files: dict[str, str]) -> str:
+    payload = json.dumps(sorted((path, sha256_text(content)) for path, content in files.items()))
+    return sha256_text(payload)
+
+
+def _proposal_files_map(proposal: PluginDevProposalResponse) -> dict[str, str]:
+    if proposal.files:
+        return {item.file_path: item.content for item in proposal.files}
+    return {proposal.file_path: proposal.result_code}
+
+
+def _primary_content_from_files(files: dict[str, str], primary_file_path: str, fallback: str) -> str:
+    normalized_primary = _primary_candidate_path(primary_file_path)
+    for key in (primary_file_path, normalized_primary):
+        if key in files:
+            return files[key]
+    return next(iter(files.values()), fallback)
 
 
 def _build_plugin_dev_instruction(
@@ -414,9 +484,21 @@ def _build_plugin_dev_instruction(
     self_check_command: str,
 ) -> str:
     version_info = get_version_info().model_dump_json()
+    plugin_top = plugin_top_dir(body.file_path)
+    if plugin_top is None:
+        form_lines = [
+            "请根据用户需求修改 NekroAgent 插件代码，并交付完整可运行的单文件插件代码。",
+            "本任务是单文件插件任务：只修改任务目标文件本身，不要创建其他文件。",
+        ]
+    else:
+        form_lines = [
+            "请根据用户需求修改 NekroAgent 插件代码，并交付完整可运行的包形式插件代码。",
+            f"本任务是包形式插件任务：可以在工作副本的 {plugin_top}/ 目录下创建或修改多个 .py 模块文件，但不要在该目录之外创建文件。",
+            f"包入口 {plugin_top}/__init__.py 必须存在模块级 plugin 实例（可以 from .plugin import plugin）。",
+        ]
     return "\n".join(
         [
-            "请根据用户需求修改 NekroAgent 插件代码，并交付完整可运行的单文件插件代码。",
+            *form_lines,
             "在输出插件代码前，必须先参考 /workspace/nekro-agent-source 的当前源码，优先检查插件基类、配置、事件、方法挂载和已有插件示例。",
             "所有 import 路径、类名、函数名、装饰器和枚举必须能在该源码中找到真实定义，不允许凭记忆编造 nekro_agent.*、plugins.* 或其他内部包路径。",
             "如果无法在源码中确认某个导入，必须改用源码中已存在的 API 或说明无法确认，不能输出会导入失败的代码。",
@@ -440,7 +522,7 @@ def _build_plugin_dev_instruction(
             f"当前工作副本路径：{sandbox_candidate_path}",
             f"插件自检命令：{self_check_command}",
             "内部插件文件网关：如需读取真实插件文件或提交写入提案，使用环境变量 NEKRO_PLUGIN_DEV_INTERNAL_API_BASE；请求头 X-Internal-API-Token 使用 INTERNAL_API_TOKEN。",
-            "通过内部网关创建 proposal 时，task_id 必须使用上方任务 ID，content 必须是完整插件文件内容。",
+            "通过内部网关创建 proposal 时，task_id 必须使用上方任务 ID，content 必须是完整插件文件内容；包形式插件请在请求体 files 数组中提交包内全部 .py 文件（[{file_path, content}]）。",
             "内部网关仅允许获取版本、列出文件、读取文件、执行自检和创建 proposal，不允许直接写入真实插件文件。",
             "",
             "当前代码快照：",
@@ -514,19 +596,38 @@ def get_latest_pending_proposal_for_task(task_id: str) -> PluginDevProposalRespo
 
 
 def create_proposal(
-    *, task_id: str, file_path: str, before: str, after: str, summary: str
+    *,
+    task_id: str,
+    file_path: str,
+    before: str,
+    after: str,
+    summary: str,
+    extra_files: dict[str, tuple[str, str]] | None = None,
 ) -> PluginDevProposalResponse:
+    """创建写入提案。extra_files 为主文件之外的文件集：{file_path: (before, after)}。"""
     proposal_id = f"proposal-{uuid.uuid4().hex}"
+    entries: list[tuple[str, str, str]] = [(file_path, before, after)]
+    for extra_path, (extra_before, extra_after) in sorted((extra_files or {}).items()):
+        if extra_path == file_path:
+            continue
+        entries.append((extra_path, extra_before, extra_after))
+
+    diff_text = "".join(_diff(path, entry_before, entry_after) for path, entry_before, entry_after in entries)
+    files = [
+        PluginDevProposalFile(file_path=path, content=entry_after, before_sha256=sha256_text(entry_before))
+        for path, entry_before, entry_after in entries
+    ]
     proposal = PluginDevProposalResponse(
         proposal_id=proposal_id,
         task_id=task_id,
         file_path=file_path,
         status="pending",
-        diff=_diff(file_path, before, after),
+        diff=diff_text,
         result_code=after,
         summary=summary,
         created_at=utc_now_iso(),
         before_sha256=sha256_text(before),
+        files=files,
     )
     _write_json(_proposal_path(proposal_id), proposal.model_dump())
     return proposal
@@ -536,10 +637,16 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
     task_data = _read_json(_task_path(task_id), {})
     try:
         current_code = body.current_code
+        plugin_top = plugin_top_dir(body.file_path)
         sandbox_candidate_path = PluginDevSandboxService.prepare_task_workspace(body.file_path, current_code)
         sandbox_candidate_host_path = PluginDevSandboxService.resolve_workspace_host_path(sandbox_candidate_path)
+        workspace_container_root = PluginDevSandboxService.workspace_current_container_root()
+        workspace_host_root = PluginDevSandboxService.resolve_workspace_host_path(workspace_container_root)
+        initial_tree = _snapshot_workspace_tree(workspace_host_root)
+        # 包任务的自检目标是顶层包目录（覆盖包内全部文件），单文件任务是文件本身
+        check_target_container_path = f"{workspace_container_root}/{plugin_top}" if plugin_top else sandbox_candidate_path
         self_check_command = PluginDevSandboxService.build_self_check_command(
-            sandbox_candidate_path,
+            check_target_container_path,
             body.file_path,
             task_id,
             "static",
@@ -585,7 +692,9 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
         next_instruction = instruction
         last_failure = ""
         last_checked_code = current_code
-        rejected_codes: set[str] = {current_code}
+        candidate_files: dict[str, str] = {}
+        initial_candidate_files, _, _ = _collect_candidate_files(initial_tree, {}, body.file_path)
+        rejected_signatures: set[str] = {_candidate_signature(initial_candidate_files)}
         tool_names_by_id: dict[str, str] = {}
 
         for attempt in range(1, _MAX_SELF_CHECK_REPAIR_ATTEMPTS + 1):
@@ -632,9 +741,11 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
                     _save_task(task_id, task_data)
 
             candidate_source = ""
+            candidate_files = {}
             proposal = get_latest_pending_proposal_for_task(task_id)
             if proposal is not None:
-                if proposal.result_code in rejected_codes:
+                proposal_files = _proposal_files_map(proposal)
+                if _candidate_signature(proposal_files) in rejected_signatures:
                     last_failure = "内部网关提案内容与已拒绝的候选代码一致，未产生新的可检查候选"
                     _discard_failed_proposal_for_retry(proposal, reason=last_failure)
                     task_data["logs"].append(f"已丢弃未变化的内部提案：{proposal.proposal_id}")
@@ -647,16 +758,30 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
                             f"警告：提案目标文件 {proposal.file_path} 与任务目标文件 {body.file_path} 不一致，将以提案为准"
                         )
                     task_data["file_path"] = proposal.file_path
-                    result_code = proposal.result_code
+                    candidate_files = proposal_files
+                    result_code = _primary_content_from_files(candidate_files, proposal.file_path, proposal.result_code)
                     candidate_source = "内部网关提案"
             else:
-                candidate_code = _read_changed_workspace_candidate(sandbox_candidate_host_path, rejected_codes)
-                if candidate_code is None:
-                    result_code = ""
-                else:
-                    result_code = candidate_code
+                current_tree = _snapshot_workspace_tree(workspace_host_root)
+                collected_files, ignored_paths, tree_changed = _collect_candidate_files(
+                    current_tree,
+                    initial_tree,
+                    body.file_path,
+                )
+                for ignored_path in ignored_paths[:5]:
+                    task_data["logs"].append(f"警告：已忽略插件范围外的工作副本文件变更：{ignored_path}")
+                if tree_changed and collected_files and _candidate_signature(collected_files) not in rejected_signatures:
+                    candidate_files = collected_files
+                    result_code = _primary_content_from_files(candidate_files, body.file_path, "")
                     candidate_source = "沙盒工作副本"
-                    task_data["logs"].append(f"检测到 CC 已修改工作副本：{sandbox_candidate_path}")
+                    if plugin_top is None:
+                        task_data["logs"].append(f"检测到 CC 已修改工作副本：{sandbox_candidate_path}")
+                    else:
+                        task_data["logs"].append(
+                            f"检测到 CC 已修改工作副本包目录 {plugin_top}/（候选共 {len(candidate_files)} 个文件）"
+                        )
+                else:
+                    result_code = ""
 
             if not result_code.strip():
                 model_error = _detect_cc_model_error(full_response)
@@ -689,7 +814,8 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
 
             if not sandbox_self_check_passed:
                 last_checked_code = result_code
-                rejected_codes.add(result_code)
+                if candidate_files:
+                    rejected_signatures.add(_candidate_signature(candidate_files))
                 last_failure = sandbox_self_check_failure or (
                     "CC 沙盒未运行通过插件自检命令；请先写入工作副本，运行提供的插件自检命令，"
                     "确认通过后再创建 proposal。"
@@ -719,13 +845,24 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
             _save_task(task_id, task_data)
 
             check_file_path = proposal.file_path if proposal is not None else body.file_path
-            check_report = await run_plugin_self_check(check_file_path, result_code, level="static")
+            extra_check_files = {
+                path: content
+                for path, content in candidate_files.items()
+                if path not in (check_file_path, _primary_candidate_path(check_file_path))
+            }
+            check_report = await run_plugin_self_check(
+                check_file_path,
+                result_code,
+                extra_files=extra_check_files or None,
+                level="static",
+            )
             _append_plugin_check_logs(task_data["logs"], check_report, prefix=f"第 {attempt} 轮宿主机复核")
             if check_report.ok:
                 break
 
             last_checked_code = result_code
-            rejected_codes.add(result_code)
+            if candidate_files:
+                rejected_signatures.add(_candidate_signature(candidate_files))
             last_failure = summarize_plugin_check(check_report)
             if proposal is not None:
                 _discard_failed_proposal_for_retry(proposal, reason=last_failure)
@@ -753,12 +890,23 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
         _save_task(task_id, task_data)
 
         if proposal is None:
+            primary_norm = _primary_candidate_path(body.file_path)
+            extra_proposal_files: dict[str, tuple[str, str]] = {}
+            for candidate_path, candidate_content in candidate_files.items():
+                if candidate_path in (body.file_path, primary_norm):
+                    continue
+                try:
+                    file_before = read_plugin_file(candidate_path)
+                except Exception:
+                    file_before = ""
+                extra_proposal_files[candidate_path] = (file_before, candidate_content)
             proposal = create_proposal(
                 task_id=task_id,
                 file_path=body.file_path,
                 before=body.base_code or current_code,
                 after=result_code,
                 summary=summary,
+                extra_files=extra_proposal_files or None,
             )
         _discard_other_pending_proposals(task_id, proposal.proposal_id)
         task_data.update(
@@ -857,30 +1005,57 @@ async def apply_proposal(proposal_id: str) -> str:
     proposal = get_proposal(proposal_id)
     if proposal.status != "pending":
         raise ValidationError(reason="该提案已处理")
-    before = ""
-    try:
-        before = read_plugin_file(proposal.file_path)
-    except Exception:
-        before = ""
 
-    if proposal.before_sha256 and sha256_text(before) != proposal.before_sha256:
-        raise ValidationError(reason="插件文件在提案创建后已被修改，为避免覆盖新的改动，请丢弃该提案并重新生成")
+    entries = list(proposal.files) or [
+        PluginDevProposalFile(
+            file_path=proposal.file_path,
+            content=proposal.result_code,
+            before_sha256=proposal.before_sha256,
+        )
+    ]
+
+    # 先对全部文件完成路径与并发修改校验，再统一写入，保证多文件应用的原子性
+    before_map: dict[str, str] = {}
+    for entry in entries:
+        resolve_plugin_file(entry.file_path)
+        try:
+            entry_before = read_plugin_file(entry.file_path)
+        except Exception:
+            entry_before = ""
+        before_map[entry.file_path] = entry_before
+        if entry.before_sha256 and sha256_text(entry_before) != entry.before_sha256:
+            raise ValidationError(
+                reason=f"插件文件 {entry.file_path} 在提案创建后已被修改，为避免覆盖新的改动，请丢弃该提案并重新生成"
+            )
+
+    primary_entry = next((entry for entry in entries if entry.file_path == proposal.file_path), entries[0])
+    extra_files = {
+        entry.file_path: entry.content for entry in entries if entry.file_path != primary_entry.file_path
+    }
 
     # 应用前执行完整加载检查（会运行候选代码）。此时用户已审阅 diff 并确认应用，
     # 信任级别等同于让插件在宿主运行；迭代期的自检始终是静态检查。
-    check_report = await run_plugin_self_check(proposal.file_path, proposal.result_code, level="smoke")
+    check_report = await run_plugin_self_check(
+        primary_entry.file_path,
+        primary_entry.content,
+        extra_files=extra_files or None,
+        level="smoke",
+    )
     if not check_report.ok:
         raise ValidationError(reason=f"插件复核未通过: {summarize_plugin_check(check_report)}")
 
-    write_plugin_file(proposal.file_path, proposal.result_code)
-    version_id = record_version(
-        file_path=proposal.file_path,
-        task_id=proposal.task_id,
-        action="apply_plugin_dev_proposal",
-        before_content=before,
-        after_content=proposal.result_code,
-        summary=proposal.summary,
-    )
+    version_ids: dict[str, str] = {}
+    for entry in entries:
+        write_plugin_file(entry.file_path, entry.content)
+        version_ids[entry.file_path] = record_version(
+            file_path=entry.file_path,
+            task_id=proposal.task_id,
+            action="apply_plugin_dev_proposal",
+            before_content=before_map[entry.file_path],
+            after_content=entry.content,
+            summary=proposal.summary,
+        )
+    version_id = version_ids.get(primary_entry.file_path) or next(iter(version_ids.values()))
 
     proposal_data = proposal.model_dump()
     proposal_data["status"] = "applied"
@@ -890,7 +1065,11 @@ async def apply_proposal(proposal_id: str) -> str:
     if task_path.exists():
         task_data = _read_json(task_path, {})
         task_data["status"] = "applied"
-        task_data.setdefault("logs", []).append(f"已应用提案，版本号：{version_id}")
+        logs = task_data.setdefault("logs", [])
+        if len(entries) > 1:
+            logs.append(f"已应用提案（共 {len(entries)} 个文件），主文件版本号：{version_id}")
+        else:
+            logs.append(f"已应用提案，版本号：{version_id}")
         _save_task(proposal.task_id, task_data)
     return version_id
 

@@ -94,11 +94,17 @@ class PluginDevInternalFileResponse(BaseModel):
     sha256: str
 
 
+class PluginDevInternalFilePayload(BaseModel):
+    file_path: str
+    content: str
+
+
 class PluginDevInternalProposalRequest(BaseModel):
     file_path: str
     content: str = Field(..., min_length=1)
     task_id: str = Field(default="plugin-dev-internal", min_length=1)
     summary: str = Field(default="由插件开发沙盒创建写入提案")
+    files: list[PluginDevInternalFilePayload] = Field(default_factory=list)
 
 
 class PluginDevInternalCheckRequest(BaseModel):
@@ -106,6 +112,7 @@ class PluginDevInternalCheckRequest(BaseModel):
     content: str = Field(..., min_length=1)
     task_id: str = Field(default="plugin-dev-internal", min_length=1)
     level: Literal["static", "load", "smoke", "strict"] = "static"
+    files: list[PluginDevInternalFilePayload] = Field(default_factory=list)
 
 
 class PluginDevGenerateResponse(BaseModel):
@@ -127,6 +134,12 @@ class PluginDevTaskResponse(BaseModel):
     version: PluginDevVersionInfo
 
 
+class PluginDevProposalFile(BaseModel):
+    file_path: str
+    content: str
+    before_sha256: str = ""
+
+
 class PluginDevProposalResponse(BaseModel):
     proposal_id: str
     task_id: str
@@ -137,6 +150,8 @@ class PluginDevProposalResponse(BaseModel):
     summary: str
     created_at: str
     before_sha256: str = ""
+    # 插件的完整文件集（含主文件）；为空表示旧版单文件提案，以 file_path/result_code 为准
+    files: list[PluginDevProposalFile] = Field(default_factory=list)
 
 
 class PluginDevApplyResponse(BaseModel):

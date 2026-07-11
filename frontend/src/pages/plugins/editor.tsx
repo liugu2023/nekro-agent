@@ -41,11 +41,11 @@ import {
   PowerSettingsNew as PowerIcon,
   ContentCopy as ContentCopyIcon,
   Clear as ClearIcon,
-  Block as BlockIcon,
   Code as CodeIcon,
   Edit as EditIcon,
   Menu as MenuIcon,
 } from '@mui/icons-material'
+import { renderPluginFileMenuItems } from './plugin-file-select'
 import { EditorTabs } from '../../components/common/NekroTabs'
 import { Editor } from '@monaco-editor/react'
 import { pluginEditorApi, streamGenerateCode } from '../../services/api/plugin-editor'
@@ -567,8 +567,8 @@ export default function PluginsEditorPage() {
       setIsGenerating(true)
       isLoadingFilesRef.current = true // 防止加载插件同时加载文件列表
 
-      // 获取模块名称：去掉扩展名(.py或.disabled)的文件名
-      const moduleName = selectedFile.replace(/\.(py|disabled)$/, '')
+      // 获取顶层模块名：包内文件按顶层目录名解析，单文件去掉 .py/.py.disabled 后缀
+      const moduleName = selectedFile.split('/')[0].replace(/\.py(\.disabled)?$/, '')
       if (!moduleName) {
         notification.error(t('editor.messages.invalidModuleName'))
         return
@@ -711,47 +711,7 @@ export default function PluginsEditorPage() {
             },
           }}
         >
-          {files.map(file => {
-            const isDisabled = file.endsWith('.disabled')
-            return (
-              <MenuItem
-                key={file}
-                value={file}
-                sx={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  color: isDisabled ? 'text.disabled' : 'text.primary',
-                  ...(isDisabled && {
-                    background: theme =>
-                      theme.palette.mode === 'dark'
-                        ? 'rgba(255, 0, 0, 0.08)'
-                        : 'rgba(255, 0, 0, 0.05)',
-                    fontStyle: 'italic',
-                  }),
-                  '&.Mui-selected': {
-                    backgroundColor: theme =>
-                      alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.2 : 0.1),
-                    color: theme =>
-                      theme.palette.mode === 'dark'
-                        ? theme.palette.primary.light
-                        : theme.palette.primary.main,
-                    fontWeight: 'bold',
-                  },
-                  '&.Mui-selected.Mui-disabled': {
-                    color: theme => alpha(theme.palette.error.main, 0.7),
-                    fontWeight: 'bold',
-                    opacity: 0.8,
-                  },
-                }}
-              >
-                <Box component="span" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                  {isDisabled && <BlockIcon color="error" fontSize="small" sx={{ opacity: 0.7 }} />}
-                  {isDisabled ? file.replace('.disabled', '') + ` (${t('editor.disabled')})` : file}
-                </Box>
-              </MenuItem>
-            )
-          })}
+          {renderPluginFileMenuItems(files, t('editor.disabled'))}
         </Select>
       </FormControl>
     </Box>
@@ -1171,58 +1131,7 @@ export default function PluginsEditorPage() {
                       },
                     }}
                   >
-                    {files.map(file => {
-                      const isDisabled = file.endsWith('.disabled')
-                      return (
-                        <MenuItem
-                          key={file}
-                          value={file}
-                          sx={{
-                            display: 'flex',
-                            justifyContent: 'space-between',
-                            alignItems: 'center',
-                            color: isDisabled ? 'text.disabled' : 'text.primary',
-                            ...(isDisabled && {
-                              background: theme =>
-                                theme.palette.mode === 'dark'
-                                  ? 'rgba(255, 0, 0, 0.08)'
-                                  : 'rgba(255, 0, 0, 0.05)',
-                              fontStyle: 'italic',
-                            }),
-                            '&.Mui-selected': {
-                              backgroundColor: theme =>
-                                alpha(
-                                  theme.palette.primary.main,
-                                  theme.palette.mode === 'dark' ? 0.25 : 0.1
-                                ),
-                              color: theme =>
-                                theme.palette.mode === 'dark'
-                                  ? theme.palette.primary.light
-                                  : theme.palette.primary.main,
-                              fontWeight: 'bold',
-                            },
-                            '&.Mui-selected.Mui-disabled': {
-                              color: theme => alpha(theme.palette.error.main, 0.8),
-                              fontWeight: 'bold',
-                              opacity: 0.9,
-                              textShadow: '0 0 1px rgba(0,0,0,0.2)',
-                            },
-                          }}
-                        >
-                          <Box
-                            component="span"
-                            sx={{ display: 'flex', alignItems: 'center', gap: 1 }}
-                          >
-                            {isDisabled && (
-                              <BlockIcon color="error" fontSize="small" sx={{ opacity: 0.7 }} />
-                            )}
-                            {isDisabled
-                              ? file.replace('.disabled', '') + ` (${t('editor.disabled')})`
-                              : file}
-                          </Box>
-                        </MenuItem>
-                      )
-                    })}
+                    {renderPluginFileMenuItems(files, t('editor.disabled'))}
                   </Select>
                 </FormControl>
                 <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>

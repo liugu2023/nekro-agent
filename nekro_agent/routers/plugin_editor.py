@@ -130,7 +130,8 @@ async def delete_plugin_file(
     if not full_path.exists():
         raise NotFoundError(resource=f"文件 {file_path}")
 
-    await plugin_collector.unload_plugin_by_module_name(full_path.stem)
+    # 按顶层模块名卸载（包内文件删除时卸载其所属的顶层包插件）
+    await plugin_collector.unload_plugin_by_module_name(file_path)
 
     full_path.unlink()
     return ActionResponse(ok=True)

@@ -69,6 +69,12 @@ export interface PluginDevTaskResponse {
   version: PluginDevVersionInfo
 }
 
+export interface PluginDevProposalFile {
+  file_path: string
+  content: string
+  before_sha256?: string
+}
+
 export interface PluginDevProposalResponse {
   proposal_id: string
   task_id: string
@@ -79,6 +85,8 @@ export interface PluginDevProposalResponse {
   summary: string
   created_at: string
   before_sha256?: string
+  /** 插件的完整文件集（含主文件）；为空表示旧版单文件提案 */
+  files?: PluginDevProposalFile[]
 }
 
 export interface PluginDevApplyResponse {

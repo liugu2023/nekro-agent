@@ -52,7 +52,9 @@ def test_plugin_dev_internal_gateway_creates_proposal_without_writing_file(tmp_p
 
     checked_levels: list[str] = []
 
-    async def fake_run_plugin_self_check(file_path: str, code: str, level: str = "static"):
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "static", extra_files: dict | None = None
+    ):
         checked_levels.append(level)
         return PluginCheckReport(
             ok=True,
@@ -116,8 +118,73 @@ def test_plugin_dev_internal_gateway_creates_proposal_without_writing_file(tmp_p
     assert checked_levels == ["static"]
     assert any("static" in warning for warning in check_payload["warnings"])
 
+    # 包形式插件：多文件提案
+    pkg_dir = plugin_root / "mypkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("from .plugin import plugin\n", encoding="utf-8")
+    (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
+    multi_response = client.post(
+        "/internal/plugin-dev/proposals",
+        headers=headers,
+        json={
+            "file_path": "mypkg/plugin.py",
+            "content": "plugin = 'pkg-updated'\n",
+            "task_id": "test-task-pkg",
+            "summary": "包多文件提案",
+            "files": [
+                {"file_path": "mypkg/plugin.py", "content": "plugin = 'pkg-updated'\n"},
+                {"file_path": "mypkg/__init__.py", "content": "from .plugin import plugin\n"},
+                {"file_path": "mypkg/utils.py", "content": "VALUE = 1\n"},
+            ],
+        },
+    )
+    assert multi_response.status_code == 200
+    multi_proposal = multi_response.json()
+    assert multi_proposal["file_path"] == "mypkg/plugin.py"
+    assert {item["file_path"] for item in multi_proposal["files"]} == {
+        "mypkg/plugin.py",
+        "mypkg/__init__.py",
+        "mypkg/utils.py",
+    }
+    assert "b/mypkg/utils.py" in multi_proposal["diff"]
+    assert not (pkg_dir / "utils.py").exists()
+
     # 任务已终态后不允许再通过网关注入新提案
     from nekro_agent.schemas.errors import ValidationError
+
+    # 多文件提案不允许跨插件根目录
+    with pytest.raises(ValidationError):
+        client.post(
+            "/internal/plugin-dev/proposals",
+            headers=headers,
+            json={
+                "file_path": "mypkg/plugin.py",
+                "content": "plugin = 'x'\n",
+                "task_id": "test-task-pkg",
+                "summary": "跨根提案",
+                "files": [
+                    {"file_path": "mypkg/plugin.py", "content": "plugin = 'x'\n"},
+                    {"file_path": "otherpkg/evil.py", "content": "VALUE = 1\n"},
+                ],
+            },
+        )
+
+    # 单文件插件不允许附带其他文件
+    with pytest.raises(ValidationError):
+        client.post(
+            "/internal/plugin-dev/proposals",
+            headers=headers,
+            json={
+                "file_path": "demo.py",
+                "content": "plugin = 'x'\n",
+                "task_id": "test-task",
+                "summary": "单文件夹带",
+                "files": [
+                    {"file_path": "demo.py", "content": "plugin = 'x'\n"},
+                    {"file_path": "sneaky.py", "content": "VALUE = 1\n"},
+                ],
+            },
+        )
 
     task_dir = tmp_path / "tasks"
     task_dir.mkdir()
@@ -266,7 +333,9 @@ async def test_plugin_dev_task_retries_cc_after_self_check_failure(tmp_path: Pat
         assert refresh_tools is True
         return _fake_sandbox_runtime(tools=["Read", "Write", "Edit", "Bash"])
 
-    async def fake_run_plugin_self_check(file_path: str, code: str, level: str = "static"):
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "static", extra_files: dict | None = None
+    ):
         checked_codes.append(code)
         checked_levels.append(level)
         if len(checked_codes) == 1:
@@ -372,7 +441,9 @@ async def test_plugin_dev_task_does_not_self_check_unchanged_default_code(tmp_pa
         assert refresh_tools is True
         return _fake_sandbox_runtime(tools=["Read", "Write", "Edit", "Bash"])
 
-    async def fake_run_plugin_self_check(file_path: str, code: str, level: str = "smoke"):
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "smoke", extra_files: dict | None = None
+    ):
         checked_codes.append(code)
         raise AssertionError(f"不应该自检未落地的默认/文本候选: {file_path} {level}")
 
@@ -520,7 +591,9 @@ async def test_plugin_dev_task_fails_fast_on_cc_model_error(tmp_path: Path, monk
     async def fake_stream_generate(_prompt: str):
         yield "There's an issue with the selected model (gpt-5.5). It may not exist or you may not have access to it. Run --model to pick a different model."
 
-    async def fake_run_plugin_self_check(file_path: str, code: str, level: str = "smoke"):
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "smoke", extra_files: dict | None = None
+    ):
         checked_codes.append(code)
         raise AssertionError(f"模型错误不应该进入自检: {file_path} {level}")
 
@@ -573,7 +646,9 @@ async def test_plugin_dev_apply_proposal_rejects_concurrent_modification(tmp_pat
 
     checked_levels: list[str] = []
 
-    async def fake_run_plugin_self_check(file_path: str, code: str, level: str = "smoke"):
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "smoke", extra_files: dict | None = None
+    ):
         checked_levels.append(level)
         return PluginCheckReport(
             ok=True,
@@ -777,3 +852,286 @@ def test_plugin_dev_cleanup_artifacts_removes_stale_files(tmp_path: Path, monkey
     # pending 提案与未超期的已处理提案保留
     assert old_pending.exists()
     assert fresh_applied.exists()
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_package_task_produces_multi_file_proposal(tmp_path: Path, monkeypatch):
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
+    from nekro_agent.schemas.plugin_dev import PluginDevGenerateRequest
+    from nekro_agent.services.plugin_dev import tasks
+    from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
+
+    plugin_root = tmp_path / "plugins"
+    task_dir = tmp_path / "tasks"
+    proposal_dir = tmp_path / "proposals"
+    workspace_dir = tmp_path / "workspace"
+    current_root = workspace_dir / "default" / "current"
+    task_id = "plugin-dev-package-test"
+    plugin_root.mkdir()
+    task_dir.mkdir()
+    proposal_dir.mkdir()
+    pkg_dir = plugin_root / "mypkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("from .plugin import plugin\n", encoding="utf-8")
+    (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
+    _write_plugin_dev_task_file(task_dir, task_id, "pending")
+
+    checked_extra_files: list[dict] = []
+    self_check_command = (
+        f"python /workspace/default/plugin_dev_check.py /workspace/default/current/mypkg mypkg/plugin.py {task_id} static"
+    )
+
+    def fake_prepare_task_workspace(_file_path: str, current_code: str) -> str:
+        # 模拟真实 staging：拷贝真实包 + 覆盖主文件
+        pkg_stage = current_root / "mypkg"
+        pkg_stage.mkdir(parents=True, exist_ok=True)
+        (pkg_stage / "__init__.py").write_text("from .plugin import plugin\n", encoding="utf-8")
+        (pkg_stage / "plugin.py").write_text(current_code, encoding="utf-8")
+        return "/workspace/default/current/mypkg/plugin.py"
+
+    async def fake_stream_generate(_prompt: str):
+        yield {"type": "tool_call", "name": "Write", "tool_use_id": "tool-write", "input": {"file_path": "/workspace/default/current/mypkg/plugin.py"}}
+        yield {"type": "tool_result", "tool_use_id": "tool-write"}
+        (current_root / "mypkg" / "plugin.py").write_text("plugin = 'pkg-fixed'\n", encoding="utf-8")
+        (current_root / "mypkg" / "utils.py").write_text("VALUE = 1\n", encoding="utf-8")
+        yield {
+            "type": "tool_call",
+            "name": "Bash",
+            "tool_use_id": "tool-bash",
+            "input": {"command": self_check_command, "description": "执行插件自检", "cwd": "/workspace/default"},
+        }
+        yield {"type": "tool_result", "tool_use_id": "tool-bash", "content": '{"ok": true}', "is_error": False}
+        yield "已写入包候选"
+
+    async def fake_inspect_runtime(refresh_tools: bool = False):
+        assert refresh_tools is True
+        return _fake_sandbox_runtime(tools=["Read", "Write", "Edit", "Bash"])
+
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "static", extra_files: dict | None = None
+    ):
+        checked_extra_files.append(dict(extra_files or {}))
+        assert level == "static"
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_TASK_DIR", task_dir)
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.sandbox.PLUGIN_DEV_WORKSPACE_DIR", workspace_dir)
+    monkeypatch.setattr(PluginDevSandboxService, "prepare_task_workspace", staticmethod(fake_prepare_task_workspace))
+    monkeypatch.setattr(PluginDevSandboxService, "inspect_runtime", staticmethod(fake_inspect_runtime))
+    monkeypatch.setattr(PluginDevSandboxService, "stream_generate", staticmethod(fake_stream_generate))
+    monkeypatch.setattr(tasks, "run_plugin_self_check", fake_run_plugin_self_check)
+
+    body = PluginDevGenerateRequest(
+        file_path="mypkg/plugin.py",
+        prompt="给包插件加工具模块",
+        current_code="plugin = None\n",
+        base_code="plugin = None\n",
+        dirty=False,
+    )
+
+    await tasks._execute_task(task_id, body, "给包插件加工具模块")
+
+    task_data = json.loads((task_dir / f"{task_id}.json").read_text(encoding="utf-8"))
+    assert task_data["status"] == "waiting_apply"
+    assert task_data["result_code"].strip() == "plugin = 'pkg-fixed'"
+    assert any("工作副本包目录 mypkg/" in log for log in task_data["logs"])
+    # 宿主复核收到包内其他文件
+    assert len(checked_extra_files) == 1
+    assert set(checked_extra_files[0]) == {"mypkg/__init__.py", "mypkg/utils.py"}
+
+    proposal = tasks.get_proposal(task_data["proposal_id"])
+    assert {item.file_path for item in proposal.files} == {
+        "mypkg/plugin.py",
+        "mypkg/__init__.py",
+        "mypkg/utils.py",
+    }
+    assert "b/mypkg/utils.py" in proposal.diff
+    # 真实插件目录未被写入
+    assert (pkg_dir / "plugin.py").read_text(encoding="utf-8") == "plugin = None\n"
+    assert not (pkg_dir / "utils.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_single_file_task_ignores_out_of_scope_files(tmp_path: Path, monkeypatch):
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
+    from nekro_agent.schemas.plugin_dev import PluginDevGenerateRequest
+    from nekro_agent.services.plugin_dev import tasks
+    from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
+
+    task_dir = tmp_path / "tasks"
+    proposal_dir = tmp_path / "proposals"
+    workspace_dir = tmp_path / "workspace"
+    current_root = workspace_dir / "default" / "current"
+    task_id = "plugin-dev-out-of-scope-test"
+    task_dir.mkdir()
+    proposal_dir.mkdir()
+    _write_plugin_dev_task_file(task_dir, task_id, "pending")
+
+    def fake_prepare_task_workspace(_file_path: str, current_code: str) -> str:
+        current_root.mkdir(parents=True, exist_ok=True)
+        (current_root / "demo.py").write_text(current_code, encoding="utf-8")
+        return "/workspace/default/current/demo.py"
+
+    async def fake_stream_generate(_prompt: str):
+        yield {"type": "tool_call", "name": "Write", "tool_use_id": "tool-write", "input": {"file_path": "/workspace/default/current/demo.py"}}
+        yield {"type": "tool_result", "tool_use_id": "tool-write"}
+        (current_root / "demo.py").write_text("plugin = 'fixed'\n", encoding="utf-8")
+        (current_root / "sneaky.py").write_text("VALUE = 1\n", encoding="utf-8")
+        yield {
+            "type": "tool_call",
+            "name": "Bash",
+            "tool_use_id": "tool-bash",
+            "input": {
+                "command": f"python /workspace/default/plugin_dev_check.py /workspace/default/current/demo.py demo.py {task_id} static",
+                "description": "执行插件自检",
+            },
+        }
+        yield {"type": "tool_result", "tool_use_id": "tool-bash", "content": '{"ok": true}', "is_error": False}
+        yield "完成"
+
+    async def fake_inspect_runtime(refresh_tools: bool = False):
+        assert refresh_tools is True
+        return _fake_sandbox_runtime(tools=["Read", "Write", "Edit", "Bash"])
+
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "static", extra_files: dict | None = None
+    ):
+        assert not extra_files, "单文件任务不应携带额外文件"
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_TASK_DIR", task_dir)
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.sandbox.PLUGIN_DEV_WORKSPACE_DIR", workspace_dir)
+    monkeypatch.setattr(PluginDevSandboxService, "prepare_task_workspace", staticmethod(fake_prepare_task_workspace))
+    monkeypatch.setattr(PluginDevSandboxService, "inspect_runtime", staticmethod(fake_inspect_runtime))
+    monkeypatch.setattr(PluginDevSandboxService, "stream_generate", staticmethod(fake_stream_generate))
+    monkeypatch.setattr(tasks, "run_plugin_self_check", fake_run_plugin_self_check)
+
+    body = PluginDevGenerateRequest(
+        file_path="demo.py",
+        prompt="修复插件",
+        current_code="plugin = None\n",
+        base_code="plugin = None\n",
+        dirty=False,
+    )
+
+    await tasks._execute_task(task_id, body, "修复插件")
+
+    task_data = json.loads((task_dir / f"{task_id}.json").read_text(encoding="utf-8"))
+    assert task_data["status"] == "waiting_apply"
+    assert any("已忽略插件范围外的工作副本文件变更：sneaky.py" in log for log in task_data["logs"])
+    proposal = tasks.get_proposal(task_data["proposal_id"])
+    assert [item.file_path for item in proposal.files] == ["demo.py"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_apply_multi_file_proposal_atomically(tmp_path: Path, monkeypatch):
+    from nekro_agent.schemas.errors import ValidationError
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
+    from nekro_agent.services.plugin_dev import tasks
+
+    plugin_root = tmp_path / "plugins"
+    proposal_dir = tmp_path / "proposals"
+    task_dir = tmp_path / "tasks"
+    plugin_root.mkdir()
+    proposal_dir.mkdir()
+    task_dir.mkdir()
+    pkg_dir = plugin_root / "mypkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("from .plugin import plugin\n", encoding="utf-8")
+    (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
+
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_TASK_DIR", task_dir)
+
+    recorded_versions: list[str] = []
+    checked_extra_files: list[dict] = []
+
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "smoke", extra_files: dict | None = None
+    ):
+        assert level == "smoke"
+        checked_extra_files.append(dict(extra_files or {}))
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    def fake_record_version(**kwargs):
+        recorded_versions.append(str(kwargs.get("file_path")))
+        return f"version-{len(recorded_versions)}"
+
+    monkeypatch.setattr(tasks, "run_plugin_self_check", fake_run_plugin_self_check)
+    monkeypatch.setattr(tasks, "record_version", fake_record_version)
+
+    proposal = tasks.create_proposal(
+        task_id="apply-multi-test",
+        file_path="mypkg/plugin.py",
+        before="plugin = None\n",
+        after="plugin = 'updated'\n",
+        summary="包更新",
+        extra_files={
+            "mypkg/utils.py": ("", "VALUE = 1\n"),
+        },
+    )
+
+    # 提案创建后其中一个文件被外部修改 → 全部拒绝、任何文件都不写入
+    (pkg_dir / "utils.py").write_text("VALUE = 999\n", encoding="utf-8")
+    with pytest.raises(ValidationError):
+        await tasks.apply_proposal(proposal.proposal_id)
+    assert (pkg_dir / "plugin.py").read_text(encoding="utf-8") == "plugin = None\n"
+    assert recorded_versions == []
+
+    # 恢复后应用成功：全部文件写入，逐文件记录版本
+    (pkg_dir / "utils.py").unlink()
+    version_id = await tasks.apply_proposal(proposal.proposal_id)
+    assert version_id == "version-1"
+    assert (pkg_dir / "plugin.py").read_text(encoding="utf-8") == "plugin = 'updated'\n"
+    assert (pkg_dir / "utils.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert set(recorded_versions) == {"mypkg/plugin.py", "mypkg/utils.py"}
+    assert checked_extra_files == [{"mypkg/utils.py": "VALUE = 1\n"}]
+
+
+def test_plugin_dev_stage_candidate_supports_package_with_extra_files(tmp_path: Path, monkeypatch):
+    from nekro_agent.services.plugin_dev.self_check import stage_plugin_candidate
+
+    plugin_root = tmp_path / "plugins"
+    stage_root = tmp_path / "stage"
+    plugin_root.mkdir()
+    pkg_dir = plugin_root / "mypkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("from .plugin import plugin\n", encoding="utf-8")
+    (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
+    (pkg_dir / "legacy.py").write_text("OLD = 1\n", encoding="utf-8")
+
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+
+    entry = stage_plugin_candidate(
+        "mypkg/plugin.py",
+        "plugin = 'candidate'\n",
+        stage_root,
+        extra_files={"mypkg/utils.py": "VALUE = 1\n"},
+    )
+
+    # 包任务的检查入口是顶层包目录
+    assert entry == stage_root / "mypkg"
+    assert (stage_root / "mypkg" / "plugin.py").read_text(encoding="utf-8") == "plugin = 'candidate'\n"
+    assert (stage_root / "mypkg" / "utils.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    # 真实包中的其他文件被一并拷入，保证完整包上下文
+    assert (stage_root / "mypkg" / "__init__.py").exists()
+    assert (stage_root / "mypkg" / "legacy.py").exists()
+
+    single_entry = stage_plugin_candidate("demo.py", "plugin = None\n", stage_root)
+    assert single_entry == stage_root / "demo.py"

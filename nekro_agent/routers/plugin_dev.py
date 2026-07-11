@@ -19,6 +19,7 @@ from nekro_agent.schemas.plugin_dev import (
     PluginDevGenerateResponse,
     PluginDevHistoryResponse,
     PluginDevInternalCheckRequest,
+    PluginDevInternalFilePayload,
     PluginDevInternalFileResponse,
     PluginDevInternalProposalRequest,
     PluginDevProposalResponse,
@@ -32,6 +33,7 @@ from nekro_agent.schemas.plugin_dev import (
 from nekro_agent.services.plugin_dev.config import get_plugin_dev_config, update_plugin_dev_config
 from nekro_agent.services.plugin_dev.host_file_gateway import (
     list_plugin_files,
+    plugin_top_dir,
     read_plugin_file,
     resolve_plugin_file,
     sha256_text,
@@ -59,6 +61,41 @@ router = APIRouter(prefix="/plugin-dev", tags=["Plugin Dev"])
 internal_router = APIRouter(prefix="/internal/plugin-dev", tags=["Plugin Dev Internal"])
 _TERMINAL_TASK_STATUSES = {"waiting_apply", "applied", "failed", "cancelled"}
 _MAX_INTERNAL_PROPOSAL_BYTES = 512 * 1024
+_MAX_INTERNAL_PROPOSAL_TOTAL_BYTES = 2 * 1024 * 1024
+_MAX_INTERNAL_PROPOSAL_FILES = 32
+
+
+def _validate_internal_file_set(
+    primary_file_path: str,
+    files: list[PluginDevInternalFilePayload],
+) -> dict[str, str]:
+    """校验多文件 payload：路径合法、与主文件同插件根、大小与数量受限。
+
+    返回主文件之外的文件集 {file_path: content}。
+    """
+    if not files:
+        return {}
+    if len(files) > _MAX_INTERNAL_PROPOSAL_FILES:
+        raise ValidationError(reason=f"文件数量超过上限（{_MAX_INTERNAL_PROPOSAL_FILES} 个）")
+    top_dir = plugin_top_dir(primary_file_path)
+    if top_dir is None and any(item.file_path != primary_file_path for item in files):
+        raise ValidationError(reason="单文件插件任务只允许提交目标文件本身")
+
+    total_bytes = 0
+    extra: dict[str, str] = {}
+    for item in files:
+        resolve_plugin_file(item.file_path)
+        if top_dir is not None and plugin_top_dir(item.file_path) != top_dir:
+            raise ValidationError(reason=f"文件 {item.file_path} 不在插件目录 {top_dir}/ 内")
+        content_bytes = len(item.content.encode("utf-8"))
+        if content_bytes > _MAX_INTERNAL_PROPOSAL_BYTES:
+            raise ValidationError(reason=f"文件 {item.file_path} 内容过大")
+        total_bytes += content_bytes
+        if item.file_path != primary_file_path:
+            extra[item.file_path] = item.content
+    if total_bytes > _MAX_INTERNAL_PROPOSAL_TOTAL_BYTES:
+        raise ValidationError(reason="文件集总大小超过上限（2MB）")
+    return extra
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -149,6 +186,7 @@ async def create_internal_plugin_proposal(
     resolve_plugin_file(body.file_path)
     if len(body.content.encode("utf-8")) > _MAX_INTERNAL_PROPOSAL_BYTES:
         raise ValidationError(reason="写入提案内容过大")
+    extra_contents = _validate_internal_file_set(body.file_path, body.files)
     task_status = get_task_status(body.task_id)
     if task_status in _TERMINAL_TASK_STATUSES:
         raise ValidationError(reason=f"任务 {body.task_id} 已结束（{task_status}），不能再创建写入提案")
@@ -156,12 +194,20 @@ async def create_internal_plugin_proposal(
         before = read_plugin_file(body.file_path)
     except NotFoundError:
         before = ""
+    extra_files: dict[str, tuple[str, str]] = {}
+    for extra_path, extra_content in extra_contents.items():
+        try:
+            extra_before = read_plugin_file(extra_path)
+        except NotFoundError:
+            extra_before = ""
+        extra_files[extra_path] = (extra_before, extra_content)
     return create_proposal(
         task_id=body.task_id,
         file_path=body.file_path,
         before=before,
         after=body.content,
         summary=body.summary.strip() or "由插件开发沙盒创建写入提案",
+        extra_files=extra_files or None,
     )
 
 
@@ -177,9 +223,15 @@ async def check_internal_plugin_candidate(
     resolve_plugin_file(body.file_path)
     if len(body.content.encode("utf-8")) > _MAX_INTERNAL_PROPOSAL_BYTES:
         raise ValidationError(reason="自检候选内容过大")
+    extra_contents = _validate_internal_file_set(body.file_path, body.files)
     # 安全约束：内部网关自检固定为 static 级别，绝不执行沙盒提交的候选代码；
     # 执行型检查（smoke）只在用户确认应用提案时进行。
-    report = await run_plugin_self_check(body.file_path, body.content, level="static")
+    report = await run_plugin_self_check(
+        body.file_path,
+        body.content,
+        extra_files=extra_contents or None,
+        level="static",
+    )
     if body.level != "static":
         report.warnings.append(f"内部网关自检固定为 static 级别，已忽略请求的 {body.level} 级别；执行型检查将在用户应用提案时进行")
     return report

@@ -27,7 +27,7 @@ from nekro_agent.services.plugin_dev.paths import (
     PLUGIN_DEV_SANDBOX_STATE_PATH,
     PLUGIN_DEV_WORKSPACE_DIR,
 )
-from nekro_agent.services.plugin_dev.self_check import stage_plugin_candidate
+from nekro_agent.services.plugin_dev.self_check import normalize_check_relative_path, stage_plugin_candidate
 from nekro_agent.services.plugin_dev.versioning import get_version_info, update_source_lock_info
 from nekro_agent.services.workspace.client import CCSandboxClient, CCSandboxError
 from nekro_agent.services.workspace.container import (
@@ -84,6 +84,8 @@ _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 - `/workspace/nekro-agent-source` 是只读参考源码，不得修改。
 - 不要自行联网拉取 GitHub main、latest 或最新 tag 作为参考；如果版本信息标记 `source_dirty`，仍以该本地快照为准。
 - 任务会提供插件工作副本路径和插件自检命令。候选代码必须先写入工作副本，再由你在 CC 沙盒里运行该自检命令；只在回复里粘贴代码不算交付。
+- 单文件任务只修改目标文件本身；包形式任务（目标文件在某个目录下）可以在该包目录内创建或修改多个 .py 模块文件，但不要在包目录之外创建文件。
+- 包形式插件的入口 `__init__.py` 必须存在模块级 `plugin` 实例（可以 `from .plugin import plugin`）。
 - 自检命令执行的是静态检查（语法、导入可用性、插件结构），不会运行插件代码；完整加载检查在用户确认应用提案时由后端执行。
 - 只有 CC 沙盒自检通过后，才能调用内部网关创建 proposal；不要在自检前创建 proposal。如果无法调用网关，也必须确保工作副本里已经是最终候选代码。
 - 如需读取真实插件文件或提交写入提案，使用 `NEKRO_PLUGIN_DEV_INTERNAL_API_BASE`，请求头带 `X-Internal-API-Token: $INTERNAL_API_TOKEN`。
@@ -91,7 +93,7 @@ _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 
 ## 交付要求
 
-- 最终回复输出完整单文件 Python 插件代码。
+- 单文件任务：最终交付完整可运行的单文件插件代码；包任务：交付包目录下完整一致的模块文件集。
 - 保留用户已有逻辑，除非任务明确要求删除。
 - 如果有风险、需要重载插件或涉及数据迁移，在代码块之外简要说明。
 """
@@ -134,6 +136,30 @@ def _fallback_report(candidate_path: str, detail: str) -> dict:
     }
 
 
+def _collect_candidate_files(candidate_path: str, file_path: str) -> tuple[str, list[dict]]:
+    """收集候选文件集。candidate_path 为目录时收集包下全部 .py，返回 (主文件内容, files)。"""
+    if not os.path.isdir(candidate_path):
+        with open(candidate_path, "r", encoding="utf-8") as file:
+            content = file.read()
+        return content, [{"file_path": file_path, "content": content}]
+
+    top_dir = file_path.replace("\\", "/").split("/")[0]
+    files = []
+    for dirpath, dirnames, filenames in os.walk(candidate_path):
+        dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+        for filename in sorted(filenames):
+            if not filename.endswith(".py"):
+                continue
+            full_path = os.path.join(dirpath, filename)
+            rel_in_pkg = os.path.relpath(full_path, candidate_path).replace(os.sep, "/")
+            with open(full_path, "r", encoding="utf-8") as file:
+                files.append({"file_path": f"{top_dir}/{rel_in_pkg}", "content": file.read()})
+    if not files:
+        raise OSError(f"候选目录中没有 .py 文件: {candidate_path}")
+    primary = next((item for item in files if item["file_path"] == file_path), files[0])
+    return primary["content"], files
+
+
 def main() -> int:
     if len(sys.argv) < 4:
         print(json.dumps(_fallback_report("", "用法: plugin_dev_check.py <candidate_path> <file_path> <task_id> [level]"), ensure_ascii=False, indent=2))
@@ -146,8 +172,7 @@ def main() -> int:
     token = os.environ.get("INTERNAL_API_TOKEN", "")
 
     try:
-        with open(candidate_path, "r", encoding="utf-8") as file:
-            content = file.read()
+        content, candidate_files = _collect_candidate_files(candidate_path, file_path)
     except OSError as exc:
         print(json.dumps(_fallback_report(candidate_path, f"读取候选文件失败: {exc}"), ensure_ascii=False, indent=2))
         return 1
@@ -158,6 +183,7 @@ def main() -> int:
             "file_path": file_path,
             "content": content,
             "level": level,
+            "files": candidate_files,
         },
         ensure_ascii=False,
     ).encode("utf-8")
@@ -742,15 +768,20 @@ class PluginDevSandboxService:
         return " ".join(shlex.quote(arg) for arg in args)
 
     @staticmethod
+    def workspace_current_container_root() -> str:
+        return f"{CONTAINER_WORKSPACE_PATH}/default/current"
+
+    @staticmethod
     def prepare_task_workspace(file_path: str, current_code: str) -> str:
         current_root = PLUGIN_DEV_WORKSPACE_DIR / "default" / "current"
         if current_root.exists():
             shutil.rmtree(current_root, ignore_errors=True)
         current_root.mkdir(parents=True, exist_ok=True)
-        staged_path = stage_plugin_candidate(file_path, current_code, current_root)
+        stage_plugin_candidate(file_path, current_code, current_root)
         PluginDevSandboxService._make_tree_writable_for_sandbox(current_root)
-        relative_path = staged_path.relative_to(PLUGIN_DEV_WORKSPACE_DIR / "default")
-        return f"{CONTAINER_WORKSPACE_PATH}/default/{relative_path.as_posix()}"
+        # 主文件容器路径始终返回文件本身（包任务时 staging 入口是目录，这里换算回主文件）
+        relative_file = normalize_check_relative_path(file_path)
+        return f"{CONTAINER_WORKSPACE_PATH}/default/current/{relative_file.as_posix()}"
 
     @staticmethod
     def _make_tree_writable_for_sandbox(path: Path) -> None:

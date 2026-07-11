@@ -51,6 +51,7 @@ import {
   streamPluginDevTask,
 } from '../../services/api/plugin-dev'
 import { pluginEditorApi } from '../../services/api/plugin-editor'
+import { renderPluginFileMenuItems } from './plugin-file-select'
 import { useNotification } from '../../hooks/useNotification'
 import { BORDER_RADIUS, CARD_STYLES, CHIP_VARIANTS } from '../../theme/variants'
 
@@ -662,7 +663,7 @@ function EditorContextPanel({
         <FormControl fullWidth size="small">
           <InputLabel>{t('editor.selectPluginFile')}</InputLabel>
           <Select value={selectedFile} label={t('editor.selectPluginFile')} onChange={onFileSelect} disabled={isBusy}>
-            {files.map(file => <MenuItem key={file} value={file}>{file}</MenuItem>)}
+            {renderPluginFileMenuItems(files, t('editor.disabled'))}
           </Select>
         </FormControl>
         <ActionButton startIcon={<AddIcon />} onClick={onOpenCreatePlugin} disabled={isBusy} sx={{ minWidth: 110 }}>
@@ -1452,6 +1453,9 @@ export default function PluginCcEditorPage() {
     try {
       const response = await pluginDevApi.applyProposal(proposalId)
       const content = await pluginEditorApi.getPluginFileContent(proposalFile)
+      // 多文件提案可能新增了包内文件，应用后刷新文件列表
+      const pluginFiles = await pluginEditorApi.getPluginFiles()
+      setFiles(pluginFiles)
       setSelectedFile(proposalFile)
       setCode(content || '')
       setOriginalCode(content || '')
