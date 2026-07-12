@@ -204,7 +204,7 @@
     "reloadPlugin": "Reload Plugin",
     "enablePlugin": "Enable Plugin",
     "disablePlugin": "Disable Plugin",
-    "togglePackageUnsupported": "Enable/disable is not yet available for folder-form plugins",
+    "toggleUnavailable": "Cannot toggle: the package is missing its __init__.py entry",
     "deleteFile": "Delete File",
     "disabled": "Disabled",
     "fileManagement": "File Management",

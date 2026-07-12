@@ -48,6 +48,14 @@ async def test_reload_reports_disabled_and_missing_plugins(tmp_path: Path):
     with pytest.raises(ValueError, match="禁用"):
         await collector.reload_plugin_by_module_name("demo.py.disabled")
 
+    # 包插件禁用形态：入口 __init__.py 被重命名为 __init__.py.disabled
+    pkg_dir = collector.workdir_plugin_dir / "pkgd"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py.disabled").write_text("from .plugin import plugin\n", encoding="utf-8")
+    (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="禁用"):
+        await collector.reload_plugin_by_module_name("pkgd/plugin.py")
+
 
 @pytest.mark.asyncio
 async def test_reload_resolves_package_inner_file_to_top_package(tmp_path: Path, monkeypatch):

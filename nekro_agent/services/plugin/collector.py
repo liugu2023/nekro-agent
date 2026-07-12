@@ -283,8 +283,12 @@ class PluginCollector:
             if self._check_module_exists(base_dir / fixed_module_name)
         ]
         if len(exists_paths) == 0:
-            if any((base_dir / f"{fixed_module_name}.py.disabled").exists() for base_dir in plugin_base_dirs):
-                raise ValueError(f"插件 `{fixed_module_name}` 处于禁用状态（.py.disabled），请先启用插件后再重载")
+            disabled_markers = [
+                *(base_dir / f"{fixed_module_name}.py.disabled" for base_dir in plugin_base_dirs),
+                *(base_dir / fixed_module_name / "__init__.py.disabled" for base_dir in plugin_base_dirs),
+            ]
+            if any(marker.exists() for marker in disabled_markers):
+                raise ValueError(f"插件 `{fixed_module_name}` 处于禁用状态，请先启用插件后再重载")
             raise ValueError(f"插件 `{fixed_module_name}` 不存在")
 
         if len(exists_paths) > 1:
