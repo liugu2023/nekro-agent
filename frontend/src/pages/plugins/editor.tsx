@@ -2,9 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Box,
   Paper,
-  FormControl,
-  InputLabel,
-  Select,
   MenuItem,
   TextField,
   Typography,
@@ -45,7 +42,7 @@ import {
   Edit as EditIcon,
   Menu as MenuIcon,
 } from '@mui/icons-material'
-import { renderPluginFileMenuItems } from './plugin-file-select'
+import PluginFileSelect from './plugin-file-select'
 import { EditorTabs } from '../../components/common/NekroTabs'
 import { Editor } from '@monaco-editor/react'
 import { pluginEditorApi, streamGenerateCode } from '../../services/api/plugin-editor'
@@ -681,39 +678,14 @@ export default function PluginsEditorPage() {
   // 渲染文件选择器
   const renderFileSelector = () => (
     <Box sx={{ mb: 2 }}>
-      <FormControl fullWidth>
-        <InputLabel>{t('editor.selectPluginFile')}</InputLabel>
-        <Select
-          value={selectedFile}
-          label={t('editor.selectPluginFile')}
-          onChange={handleFileSelect}
-          sx={{
-            '& .MuiSelect-select': {
-              paddingY: isSmall ? 1 : 1.5,
-            },
-            '& .MuiListItem-root.Mui-selected': {
-              backgroundColor: theme =>
-                alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.3 : 0.1),
-              color: theme => theme.palette.primary.main,
-              fontWeight: 'bold',
-            },
-          }}
-          MenuProps={{
-            PaperProps: {
-              sx: {
-                '& .MuiMenuItem-root.Mui-selected': {
-                  backgroundColor: theme =>
-                    alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.3 : 0.1),
-                  color: theme => theme.palette.primary.main,
-                  fontWeight: 'bold',
-                },
-              },
-            },
-          }}
-        >
-          {renderPluginFileMenuItems(files, t('editor.disabled'))}
-        </Select>
-      </FormControl>
+      <PluginFileSelect
+        files={files}
+        value={selectedFile}
+        onChange={handleFileSelect}
+        label={t('editor.selectPluginFile')}
+        disabledLabel={t('editor.disabled')}
+        size={isSmall ? 'small' : 'medium'}
+      />
     </Box>
   )
 
@@ -1105,35 +1077,15 @@ export default function PluginsEditorPage() {
             {/* 顶部工具栏 */}
             <Box sx={{ display: 'flex', gap: 2, justifyContent: 'space-between' }}>
               <Box sx={{ display: 'flex', gap: 2, flex: 1 }}>
-                <FormControl sx={{ flex: 1 }}>
-                  <InputLabel>选择插件文件</InputLabel>
-                  <Select
-                    value={selectedFile}
-                    label="选择插件文件"
-                    onChange={handleFileSelect}
-                    MenuProps={{
-                      PaperProps: {
-                        sx: {
-                          maxHeight: 300,
-                          '& .MuiMenuItem-root.Mui-selected': {
-                            backgroundColor: theme =>
-                              alpha(
-                                theme.palette.primary.main,
-                                theme.palette.mode === 'dark' ? 0.25 : 0.1
-                              ),
-                            color: theme =>
-                              theme.palette.mode === 'dark'
-                                ? theme.palette.primary.light
-                                : theme.palette.primary.main,
-                            fontWeight: 'bold',
-                          },
-                        },
-                      },
-                    }}
-                  >
-                    {renderPluginFileMenuItems(files, t('editor.disabled'))}
-                  </Select>
-                </FormControl>
+                <PluginFileSelect
+                  files={files}
+                  value={selectedFile}
+                  onChange={handleFileSelect}
+                  label={t('editor.selectPluginFile')}
+                  disabledLabel={t('editor.disabled')}
+                  fullWidth={false}
+                  formControlSx={{ flex: 1 }}
+                />
                 <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
                   {renderFileActions()}
                 </Box>

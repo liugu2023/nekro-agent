@@ -204,6 +204,7 @@
     "reloadPlugin": "Reload Plugin",
     "enablePlugin": "Enable Plugin",
     "disablePlugin": "Disable Plugin",
+    "togglePackageUnsupported": "Enable/disable is not yet available for folder-form plugins",
     "deleteFile": "Delete File",
     "disabled": "Disabled",
     "fileManagement": "File Management",

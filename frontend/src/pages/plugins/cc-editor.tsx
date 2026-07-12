@@ -18,13 +18,17 @@ import {
   SelectChangeEvent,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material'
 import {
   Add as AddIcon,
   Code as CodeIcon,
+  Delete as DeleteIcon,
+  Extension as ExtensionIcon,
   History as HistoryIcon,
   PlayArrow as PlayArrowIcon,
+  PowerSettingsNew as PowerIcon,
   Refresh as RefreshIcon,
   Restore as RestoreIcon,
   Save as SaveIcon,
@@ -51,7 +55,8 @@ import {
   streamPluginDevTask,
 } from '../../services/api/plugin-dev'
 import { pluginEditorApi } from '../../services/api/plugin-editor'
-import { renderPluginFileMenuItems } from './plugin-file-select'
+import { reloadPlugins } from '../../services/api/plugins'
+import PluginFileSelect from './plugin-file-select'
 import { useNotification } from '../../hooks/useNotification'
 import { BORDER_RADIUS, CARD_STYLES, CHIP_VARIANTS } from '../../theme/variants'
 
@@ -632,6 +637,10 @@ interface EditorContextPanelProps {
   canApplyProposal: boolean
   onFileSelect: (event: SelectChangeEvent<string>) => void
   onOpenCreatePlugin: () => void
+  onReloadPlugin: () => void
+  onTogglePlugin: () => void
+  onDeletePlugin: () => void
+  canTogglePlugin: boolean
   onCodeChange: (value: string) => void
   onClearProposal: () => void
   onApplyProposal: () => void
@@ -649,6 +658,10 @@ function EditorContextPanel({
   canApplyProposal,
   onFileSelect,
   onOpenCreatePlugin,
+  onReloadPlugin,
+  onTogglePlugin,
+  onDeletePlugin,
+  canTogglePlugin,
   onCodeChange,
   onClearProposal,
   onApplyProposal,
@@ -656,19 +669,69 @@ function EditorContextPanel({
 }: EditorContextPanelProps) {
   const theme = useTheme()
   const hasProposalDiff = Boolean(proposalDiff)
+  const isPluginDisabled = selectedFile.endsWith('.disabled')
 
   return (
     <Paper sx={{ ...CARD_STYLES.DEFAULT, p: 2, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, gap: 1.5 }}>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} sx={{ flexShrink: 0 }}>
-        <FormControl fullWidth size="small">
-          <InputLabel>{t('editor.selectPluginFile')}</InputLabel>
-          <Select value={selectedFile} label={t('editor.selectPluginFile')} onChange={onFileSelect} disabled={isBusy}>
-            {renderPluginFileMenuItems(files, t('editor.disabled'))}
-          </Select>
-        </FormControl>
+        <PluginFileSelect
+          files={files}
+          value={selectedFile}
+          onChange={onFileSelect}
+          label={t('editor.selectPluginFile')}
+          disabledLabel={t('editor.disabled')}
+          disabled={isBusy}
+          size="small"
+        />
         <ActionButton startIcon={<AddIcon />} onClick={onOpenCreatePlugin} disabled={isBusy} sx={{ minWidth: 110 }}>
           {t('editor.create')}
         </ActionButton>
+      </Stack>
+      <Stack direction="row" spacing={0.5} alignItems="center" sx={{ flexShrink: 0 }}>
+        <Tooltip title={t('editor.reloadPlugin')}>
+          <span>
+            <IconActionButton
+              size="small"
+              color="primary"
+              onClick={onReloadPlugin}
+              disabled={isBusy || !selectedFile}
+            >
+              <ExtensionIcon fontSize="small" />
+            </IconActionButton>
+          </span>
+        </Tooltip>
+        <Tooltip
+          title={
+            selectedFile && !canTogglePlugin
+              ? t('editor.togglePackageUnsupported')
+              : isPluginDisabled
+                ? t('editor.enablePlugin')
+                : t('editor.disablePlugin')
+          }
+        >
+          <span>
+            <IconActionButton
+              size="small"
+              color={isPluginDisabled ? 'success' : 'warning'}
+              onClick={onTogglePlugin}
+              disabled={isBusy || !selectedFile || !canTogglePlugin}
+            >
+              <PowerIcon fontSize="small" />
+            </IconActionButton>
+          </span>
+        </Tooltip>
+        <Tooltip title={t('actions.delete')}>
+          <span>
+            <IconActionButton
+              size="small"
+              color="error"
+              onClick={onDeletePlugin}
+              disabled={isBusy || !selectedFile}
+            >
+              <DeleteIcon fontSize="small" />
+            </IconActionButton>
+          </span>
+        </Tooltip>
       </Stack>
       {hasLocalChanges && !hasProposalDiff && <Alert severity="warning" sx={{ flexShrink: 0 }}>{t('editor.pluginDev.unsavedContext')}</Alert>}
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ flexShrink: 0 }}>
@@ -959,6 +1022,10 @@ export default function PluginCcEditorPage() {
   const [isHistoryLoading, setIsHistoryLoading] = useState(false)
   const [isRollingBack, setIsRollingBack] = useState(false)
   const [newPluginOpen, setNewPluginOpen] = useState(false)
+  const [reloadPluginDialogOpen, setReloadPluginDialogOpen] = useState(false)
+  const [togglePluginDialogOpen, setTogglePluginDialogOpen] = useState(false)
+  const [deletePluginDialogOpen, setDeletePluginDialogOpen] = useState(false)
+  const [isFileOpBusy, setIsFileOpBusy] = useState(false)
   const [newPluginName, setNewPluginName] = useState('')
   const [newPluginDescription, setNewPluginDescription] = useState('')
   const [newPluginCreateMode, setNewPluginCreateMode] = useState<NewPluginCreateMode>('file')
@@ -1475,6 +1542,72 @@ export default function PluginCcEditorPage() {
     }
   }
 
+  const handleReloadPlugin = async () => {
+    if (!selectedFile) return
+    const moduleName = selectedFile.split('/')[0].replace(/\.py(\.disabled)?$/, '')
+    setIsFileOpBusy(true)
+    try {
+      const result = await reloadPlugins(moduleName)
+      if (!result.success) {
+        notification.error(result.errorMsg || t('editor.messages.reloadFailed'))
+        return
+      }
+      const pluginFiles = await pluginEditorApi.getPluginFiles()
+      setFiles(pluginFiles)
+      notification.success(t('editor.messages.reloadSuccess', { name: moduleName }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
+      notification.error(`${t('editor.messages.reloadFailed')}: ${message}`)
+    } finally {
+      setIsFileOpBusy(false)
+      setReloadPluginDialogOpen(false)
+    }
+  }
+
+  const handleTogglePlugin = async () => {
+    // 包形式插件暂不支持一键启停（目录没有 .disabled 语义）
+    if (!selectedFile || selectedFile.includes('/')) return
+    const isDisabled = selectedFile.endsWith('.disabled')
+    const newFileName = isDisabled ? selectedFile.replace(/\.disabled$/, '') : `${selectedFile}.disabled`
+    const action = isDisabled ? t('editor.messages.enabled') : t('editor.messages.disabled')
+    setIsFileOpBusy(true)
+    try {
+      await pluginEditorApi.savePluginFile(newFileName, code)
+      await pluginEditorApi.deletePluginFile(selectedFile)
+      const pluginFiles = await pluginEditorApi.getPluginFiles()
+      setFiles(pluginFiles)
+      setSelectedFile(newFileName)
+      setOriginalCode(code)
+      notification.success(t('editor.messages.toggleSuccess', { action }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
+      notification.error(`${t('editor.messages.toggleFailed', { action })}: ${message}`)
+    } finally {
+      setIsFileOpBusy(false)
+      setTogglePluginDialogOpen(false)
+    }
+  }
+
+  const handleDeletePlugin = async () => {
+    if (!selectedFile) return
+    setIsFileOpBusy(true)
+    try {
+      await pluginEditorApi.deletePluginFile(selectedFile)
+      const pluginFiles = await pluginEditorApi.getPluginFiles()
+      setFiles(pluginFiles)
+      setSelectedFile('')
+      setCode('')
+      setOriginalCode('')
+      notification.success(t('editor.messages.deleteSuccess'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
+      notification.error(`${t('editor.messages.deleteFailed')}: ${message}`)
+    } finally {
+      setIsFileOpBusy(false)
+      setDeletePluginDialogOpen(false)
+    }
+  }
+
   return (
     <Box
       sx={{
@@ -1530,11 +1663,15 @@ export default function PluginCcEditorPage() {
             code={code}
             proposalDiff={hasPendingProposal ? task?.diff || '' : ''}
             hasLocalChanges={hasLocalChanges}
-            isBusy={isInteractionLocked}
+            isBusy={isInteractionLocked || isFileOpBusy}
             isApplyingProposal={isApplyingProposal}
             canApplyProposal={canApplyProposal}
             onFileSelect={handleFileSelect}
             onOpenCreatePlugin={() => setNewPluginOpen(true)}
+            onReloadPlugin={() => setReloadPluginDialogOpen(true)}
+            onTogglePlugin={() => setTogglePluginDialogOpen(true)}
+            onDeletePlugin={() => setDeletePluginDialogOpen(true)}
+            canTogglePlugin={Boolean(selectedFile) && !selectedFile.includes('/')}
             onCodeChange={handleCodeChange}
             onClearProposal={handleClearProposal}
             onApplyProposal={handleApplyProposal}
@@ -1592,6 +1729,57 @@ export default function PluginCcEditorPage() {
         <DialogActions>
           <ActionButton onClick={() => setNewPluginOpen(false)}>{t('editor.cancel')}</ActionButton>
           <ActionButton tone="primary" onClick={handleCreatePlugin}>{t('editor.create')}</ActionButton>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={reloadPluginDialogOpen} onClose={() => setReloadPluginDialogOpen(false)}>
+        <DialogTitle>{t('editor.dialogs.reloadTitle')}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>{t('editor.dialogs.reloadMessage')}</DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <ActionButton onClick={() => setReloadPluginDialogOpen(false)}>{t('editor.cancel')}</ActionButton>
+          <ActionButton tone="primary" onClick={handleReloadPlugin} disabled={isFileOpBusy}>
+            {t('actions.reload')}
+          </ActionButton>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={togglePluginDialogOpen} onClose={() => setTogglePluginDialogOpen(false)}>
+        <DialogTitle>
+          {t('editor.dialogs.toggleTitle', {
+            action: selectedFile.endsWith('.disabled')
+              ? t('editor.messages.enabled')
+              : t('editor.messages.disabled'),
+          })}
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {t('editor.dialogs.toggleMessage', {
+              action: selectedFile.endsWith('.disabled')
+                ? t('editor.messages.enabled')
+                : t('editor.messages.disabled'),
+            })}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <ActionButton onClick={() => setTogglePluginDialogOpen(false)}>{t('editor.cancel')}</ActionButton>
+          <ActionButton tone="primary" onClick={handleTogglePlugin} disabled={isFileOpBusy}>
+            {selectedFile.endsWith('.disabled') ? t('editor.enablePlugin') : t('editor.disablePlugin')}
+          </ActionButton>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={deletePluginDialogOpen} onClose={() => setDeletePluginDialogOpen(false)}>
+        <DialogTitle>{t('editor.dialogs.deleteTitle')}</DialogTitle>
+        <DialogContent>
+          <DialogContentText>{t('editor.dialogs.deleteMessage', { file: selectedFile })}</DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <ActionButton onClick={() => setDeletePluginDialogOpen(false)}>{t('editor.cancel')}</ActionButton>
+          <ActionButton tone="danger" onClick={handleDeletePlugin} disabled={isFileOpBusy}>
+            {t('actions.delete')}
+          </ActionButton>
         </DialogActions>
       </Dialog>
 

@@ -204,6 +204,7 @@
     "reloadPlugin": "重载插件",
     "enablePlugin": "启用插件",
     "disablePlugin": "禁用插件",
+    "togglePackageUnsupported": "包形式插件暂不支持一键启停",
     "deleteFile": "删除文件",
     "disabled": "已禁用",
     "fileManagement": "文件管理",
