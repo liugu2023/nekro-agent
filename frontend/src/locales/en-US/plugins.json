@@ -204,7 +204,7 @@
     "reloadPlugin": "Reload Plugin",
     "enablePlugin": "Enable Plugin",
     "disablePlugin": "Disable Plugin",
-    "toggleUnavailable": "Cannot toggle: the package is missing its __init__.py entry",
+    "toggleUnavailable": "Cannot toggle: plugin is not loaded",
     "deleteFile": "Delete File",
     "disabled": "Disabled",
     "fileManagement": "File Management",
@@ -238,7 +238,7 @@
       "invalidModuleName": "Cannot get valid module name",
       "reloadFailed": "Failed to reload plugin",
       "reloadSuccess": "Plugin {{name}} reloaded successfully",
-      "toggleSuccess": "Plugin {{action}} successfully, please reload to apply changes",
+      "toggleSuccess": "Plugin {{action}} successfully",
       "toggleFailed": "Failed to {{action}} plugin",
       "codeCopied": "Code copied to clipboard",
       "generateCleared": "Generated result cleared",
@@ -273,7 +273,7 @@
       "reloadTitle": "Confirm Reload",
       "reloadMessage": "Are you sure you want to reload the current plugin? This will reinitialize the plugin and apply code changes.",
       "toggleTitle": "{{action}} Plugin",
-      "toggleMessage": "Are you sure you want to {{action}} the current plugin? Reload is required after {{action}}."
+      "toggleMessage": "Are you sure you want to {{action}} the current plugin?"
     },
     "generatorModes": {
       "basic": "Basic",

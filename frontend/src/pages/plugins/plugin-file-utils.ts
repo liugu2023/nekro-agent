@@ -1,37 +1,26 @@
-export interface PluginToggleTarget {
-  /** 插件当前是否处于禁用状态 */
-  isDisabled: boolean
-  /** 启停时需要重命名的现存文件（单文件插件为自身，包插件为其 __init__.py 入口） */
-  sourcePath: string
-  /** 重命名后的目标路径 */
-  targetPath: string
+import { Plugin } from '../../services/api/plugins'
+
+/** 从插件文件路径提取顶层模块名（包目录名或去掉 .py/.py.disabled 后缀的文件名） */
+export function topModuleNameOf(filePath: string): string {
+  return filePath.split('/')[0].replace(/\.py(\.disabled)?$/, '')
 }
 
 /**
- * 计算插件启停（启用/禁用）操作的目标文件。
+ * 在已加载插件列表中查找文件对应的插件。
  *
- * 单文件插件切换自身的 .disabled 后缀；包插件切换包入口 __init__.py 的
- * .disabled 后缀（加载器只加载含 __init__.py 的目录，重命名入口即整包禁用）。
- * 包目录缺少入口文件时返回 null，表示无法启停。
+ * 按声明模块名与插件 key（author.moduleName）尾段宽容匹配；文件未被加载为
+ * 插件（如 .py.disabled 文件、加载失败、目录缺少 __init__.py）时返回 null。
  */
-export function getPluginToggleTarget(files: string[], selectedFile: string): PluginToggleTarget | null {
-  if (!selectedFile) return null
-  const separatorIndex = selectedFile.indexOf('/')
-  if (separatorIndex <= 0) {
-    const isDisabled = selectedFile.endsWith('.disabled')
-    return {
-      isDisabled,
-      sourcePath: selectedFile,
-      targetPath: isDisabled ? selectedFile.replace(/\.disabled$/, '') : `${selectedFile}.disabled`,
-    }
-  }
-  const initPath = `${selectedFile.slice(0, separatorIndex)}/__init__.py`
-  const disabledInitPath = `${initPath}.disabled`
-  if (files.includes(initPath)) {
-    return { isDisabled: false, sourcePath: initPath, targetPath: disabledInitPath }
-  }
-  if (files.includes(disabledInitPath)) {
-    return { isDisabled: true, sourcePath: disabledInitPath, targetPath: initPath }
-  }
-  return null
+export function findPluginByFile(plugins: Plugin[], filePath: string): Plugin | null {
+  const topModule = topModuleNameOf(filePath)
+  if (!topModule) return null
+  return (
+    plugins.find(
+      plugin =>
+        !plugin.loadFailed &&
+        (plugin.moduleName === topModule ||
+          plugin.id === topModule ||
+          plugin.id.endsWith(`.${topModule}`))
+    ) ?? null
+  )
 }

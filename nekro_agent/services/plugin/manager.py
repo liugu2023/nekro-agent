@@ -80,6 +80,7 @@ async def get_all_ext_meta_data() -> List[dict]:
         {
             "id": plugin.key,
             "name": plugin.name,
+            "moduleName": plugin.module_name,
             "description": plugin.description,
             "version": plugin.version,
             "author": plugin.author,

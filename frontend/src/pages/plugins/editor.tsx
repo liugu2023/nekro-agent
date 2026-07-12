@@ -43,11 +43,11 @@ import {
   Menu as MenuIcon,
 } from '@mui/icons-material'
 import PluginFileSelect from './plugin-file-select'
-import { getPluginToggleTarget } from './plugin-file-utils'
+import { findPluginByFile, topModuleNameOf } from './plugin-file-utils'
 import { EditorTabs } from '../../components/common/NekroTabs'
 import { Editor } from '@monaco-editor/react'
 import { pluginEditorApi, streamGenerateCode } from '../../services/api/plugin-editor'
-import { reloadPlugins } from '../../services/api/plugins'
+import { reloadPlugins, getPlugins, togglePluginEnabled, Plugin } from '../../services/api/plugins'
 import { alpha } from '@mui/material/styles'
 import { useNotification } from '../../hooks/useNotification'
 import { CARD_STYLES, BORDER_RADIUS } from '../../theme/variants'
@@ -152,6 +152,8 @@ export default function PluginsEditorPage() {
   const [reloadExtDialogOpen, setReloadExtDialogOpen] = useState(false)
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null)
   const [isDisableDialogOpen, setIsDisableDialogOpen] = useState(false)
+  const [pluginInfo, setPluginInfo] = useState<Plugin | null>(null)
+  const [pluginInfoTick, setPluginInfoTick] = useState(0)
   const [activeTab, setActiveTab] = useState(0)
   const [drawerOpen, setDrawerOpen] = useState(false)
 
@@ -566,7 +568,7 @@ export default function PluginsEditorPage() {
       isLoadingFilesRef.current = true // 防止加载插件同时加载文件列表
 
       // 获取顶层模块名：包内文件按顶层目录名解析，单文件去掉 .py/.py.disabled 后缀
-      const moduleName = selectedFile.split('/')[0].replace(/\.py(\.disabled)?$/, '')
+      const moduleName = topModuleNameOf(selectedFile)
       if (!moduleName) {
         notification.error(t('editor.messages.invalidModuleName'))
         return
@@ -582,6 +584,7 @@ export default function PluginsEditorPage() {
       // 重新加载文件列表但不自动选择文件
       const files = await pluginEditorApi.getPluginFiles()
       setFiles(files)
+      setPluginInfoTick(tick => tick + 1)
 
       // 保持当前选中文件不变
       notification.success(t('editor.messages.reloadSuccess', { name: moduleName }))
@@ -603,52 +606,43 @@ export default function PluginsEditorPage() {
     setAnchorEl(null)
   }
 
-  // 处理启用/禁用插件：单文件插件切换自身，包插件切换其 __init__.py 入口
-  const pluginToggle = getPluginToggleTarget(files, selectedFile)
+  // 选中文件对应的已加载插件（启停复用插件管理的运行时开关，无需重载）
+  useEffect(() => {
+    if (!selectedFile) {
+      setPluginInfo(null)
+      return
+    }
+    let cancelled = false
+    getPlugins()
+      .then(plugins => {
+        if (!cancelled) setPluginInfo(findPluginByFile(plugins, selectedFile))
+      })
+      .catch(() => {
+        if (!cancelled) setPluginInfo(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedFile, pluginInfoTick])
 
   const handleTogglePlugin = async () => {
-    if (!pluginToggle) return
-    const { isDisabled, sourcePath, targetPath } = pluginToggle
+    if (!pluginInfo) return
+    const nextEnabled = !pluginInfo.enabled
+    const action = nextEnabled ? t('editor.messages.enabled') : t('editor.messages.disabled')
 
     try {
       setIsLoading(true)
-      isLoadingContentRef.current = true
-
-      // 正在编辑被重命名的文件时用编辑器内容，否则读取磁盘内容
-      const content =
-        sourcePath === selectedFile ? code : await pluginEditorApi.getPluginFileContent(sourcePath)
-      if (content === null) {
-        throw new Error(t('editor.messages.loadContentFailed'))
+      const ok = await togglePluginEnabled(pluginInfo.id, nextEnabled)
+      if (!ok) {
+        throw new Error(t('editor.messages.unknownError'))
       }
-
-      // 保存文件内容到新文件名
-      await pluginEditorApi.savePluginFile(targetPath, content)
-      // 删除旧文件
-      await pluginEditorApi.deletePluginFile(sourcePath)
-
-      // 更新状态
-      if (sourcePath === selectedFile) {
-        setSelectedFile(targetPath)
-        prevSelectedFileRef.current = targetPath
-        setHasUnsavedChanges(false)
-      }
-
-      // 更新文件列表
-      const files = await pluginEditorApi.getPluginFiles()
-      setFiles(files)
-
-      notification.success(
-        t('editor.messages.toggleSuccess', {
-          action: isDisabled ? t('editor.messages.enabled') : t('editor.messages.disabled'),
-        })
-      )
+      setPluginInfoTick(tick => tick + 1)
+      notification.success(t('editor.messages.toggleSuccess', { action }))
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err)
-      const action = isDisabled ? t('editor.messages.enabled') : t('editor.messages.disabled')
       notification.error(t('editor.messages.toggleFailed', { action }) + ': ' + errorMsg)
     } finally {
       setIsLoading(false)
-      isLoadingContentRef.current = false
       setIsDisableDialogOpen(false)
     }
   }
@@ -761,8 +755,8 @@ export default function PluginsEditorPage() {
       <ActionButton
         startIcon={<PowerIcon />}
         onClick={() => setIsDisableDialogOpen(true)}
-        disabled={!pluginToggle}
-        color={pluginToggle?.isDisabled ? 'success' : 'warning'}
+        disabled={!pluginInfo}
+        color={pluginInfo?.enabled === false ? 'success' : 'warning'}
         sx={{
           flex: isMobile ? '1 1 calc(50% - 4px)' : 'auto',
           mb: isMobile ? 1 : 0,
@@ -770,10 +764,10 @@ export default function PluginsEditorPage() {
         size={isSmall ? 'small' : 'medium'}
       >
         {isSmall
-          ? pluginToggle?.isDisabled
+          ? pluginInfo?.enabled === false
             ? t('editor.messages.enabled')
             : t('editor.messages.disabled')
-          : pluginToggle?.isDisabled
+          : pluginInfo?.enabled === false
             ? t('editor.enablePlugin')
             : t('editor.disablePlugin')}
       </ActionButton>
@@ -1001,13 +995,13 @@ export default function PluginsEditorPage() {
                 setIsDisableDialogOpen(true)
                 setDrawerOpen(false)
               }}
-              disabled={!pluginToggle}
-              color={pluginToggle?.isDisabled ? 'success' : 'warning'}
+              disabled={!pluginInfo}
+              color={pluginInfo?.enabled === false ? 'success' : 'warning'}
               size={isSmall ? 'small' : 'medium'}
               fullWidth
               sx={{
                 fontWeight: 'medium',
-                ...(pluginToggle?.isDisabled && {
+                ...(pluginInfo?.enabled === false && {
                   borderColor: theme => alpha(theme.palette.success.main, 0.5),
                   color: 'success.main',
                   '&:hover': {
@@ -1015,18 +1009,17 @@ export default function PluginsEditorPage() {
                     backgroundColor: theme => alpha(theme.palette.success.main, 0.1),
                   },
                 }),
-                ...(!pluginToggle?.isDisabled &&
-                  pluginToggle && {
-                    borderColor: theme => alpha(theme.palette.warning.main, 0.5),
-                    color: 'warning.main',
-                    '&:hover': {
-                      borderColor: 'warning.main',
-                      backgroundColor: theme => alpha(theme.palette.warning.main, 0.1),
-                    },
-                  }),
+                ...(pluginInfo?.enabled && {
+                  borderColor: theme => alpha(theme.palette.warning.main, 0.5),
+                  color: 'warning.main',
+                  '&:hover': {
+                    borderColor: 'warning.main',
+                    backgroundColor: theme => alpha(theme.palette.warning.main, 0.1),
+                  },
+                }),
               }}
             >
-              {pluginToggle?.isDisabled
+              {pluginInfo?.enabled === false
                 ? t('editor.enablePlugin')
                 : t('editor.disablePlugin')}
             </ActionButton>
@@ -2129,14 +2122,14 @@ export default function PluginsEditorPage() {
       {/* 启用/禁用插件对话框 */}
       <Dialog open={isDisableDialogOpen} onClose={() => setIsDisableDialogOpen(false)}>
         <DialogTitle>
-          {pluginToggle?.isDisabled
+          {pluginInfo?.enabled === false
             ? t('editor.dialogs.toggleTitle', { action: t('editor.messages.enabled') })
             : t('editor.dialogs.toggleTitle', { action: t('editor.messages.disabled') })}
         </DialogTitle>
         <DialogContent>
           <DialogContentText>
             {t('editor.dialogs.toggleMessage', {
-              action: pluginToggle?.isDisabled
+              action: pluginInfo?.enabled === false
                 ? t('editor.messages.enabled')
                 : t('editor.messages.disabled'),
             })}
@@ -2146,10 +2139,10 @@ export default function PluginsEditorPage() {
           <ActionButton onClick={() => setIsDisableDialogOpen(false)}>{t('editor.cancel')}</ActionButton>
           <ActionButton
             onClick={handleTogglePlugin}
-            color={pluginToggle?.isDisabled ? 'success' : 'warning'}
+            color={pluginInfo?.enabled === false ? 'success' : 'warning'}
             variant="contained"
           >
-            {pluginToggle?.isDisabled
+            {pluginInfo?.enabled === false
               ? t('editor.messages.enabled')
               : t('editor.messages.disabled')}
           </ActionButton>

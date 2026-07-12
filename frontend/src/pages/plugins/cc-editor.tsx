@@ -55,9 +55,9 @@ import {
   streamPluginDevTask,
 } from '../../services/api/plugin-dev'
 import { pluginEditorApi } from '../../services/api/plugin-editor'
-import { reloadPlugins } from '../../services/api/plugins'
+import { getPlugins, Plugin, reloadPlugins, togglePluginEnabled } from '../../services/api/plugins'
 import PluginFileSelect from './plugin-file-select'
-import { getPluginToggleTarget, PluginToggleTarget } from './plugin-file-utils'
+import { findPluginByFile, topModuleNameOf } from './plugin-file-utils'
 import { useNotification } from '../../hooks/useNotification'
 import { BORDER_RADIUS, CARD_STYLES, CHIP_VARIANTS } from '../../theme/variants'
 
@@ -641,7 +641,7 @@ interface EditorContextPanelProps {
   onReloadPlugin: () => void
   onTogglePlugin: () => void
   onDeletePlugin: () => void
-  pluginToggle: PluginToggleTarget | null
+  pluginEnabled: boolean | null
   onCodeChange: (value: string) => void
   onClearProposal: () => void
   onApplyProposal: () => void
@@ -662,7 +662,7 @@ function EditorContextPanel({
   onReloadPlugin,
   onTogglePlugin,
   onDeletePlugin,
-  pluginToggle,
+  pluginEnabled,
   onCodeChange,
   onClearProposal,
   onApplyProposal,
@@ -670,7 +670,7 @@ function EditorContextPanel({
 }: EditorContextPanelProps) {
   const theme = useTheme()
   const hasProposalDiff = Boolean(proposalDiff)
-  const isPluginDisabled = pluginToggle?.isDisabled ?? false
+  const isPluginDisabled = pluginEnabled === false
 
   return (
     <Paper sx={{ ...CARD_STYLES.DEFAULT, p: 2, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, gap: 1.5 }}>
@@ -703,7 +703,7 @@ function EditorContextPanel({
         </Tooltip>
         <Tooltip
           title={
-            selectedFile && !pluginToggle
+            selectedFile && pluginEnabled === null
               ? t('editor.toggleUnavailable')
               : isPluginDisabled
                 ? t('editor.enablePlugin')
@@ -715,7 +715,7 @@ function EditorContextPanel({
               size="small"
               color={isPluginDisabled ? 'success' : 'warning'}
               onClick={onTogglePlugin}
-              disabled={isBusy || !pluginToggle}
+              disabled={isBusy || pluginEnabled === null}
             >
               <PowerIcon fontSize="small" />
             </IconActionButton>
@@ -1027,6 +1027,8 @@ export default function PluginCcEditorPage() {
   const [togglePluginDialogOpen, setTogglePluginDialogOpen] = useState(false)
   const [deletePluginDialogOpen, setDeletePluginDialogOpen] = useState(false)
   const [isFileOpBusy, setIsFileOpBusy] = useState(false)
+  const [pluginInfo, setPluginInfo] = useState<Plugin | null>(null)
+  const [pluginInfoTick, setPluginInfoTick] = useState(0)
   const [newPluginName, setNewPluginName] = useState('')
   const [newPluginDescription, setNewPluginDescription] = useState('')
   const [newPluginCreateMode, setNewPluginCreateMode] = useState<NewPluginCreateMode>('file')
@@ -1545,7 +1547,7 @@ export default function PluginCcEditorPage() {
 
   const handleReloadPlugin = async () => {
     if (!selectedFile) return
-    const moduleName = selectedFile.split('/')[0].replace(/\.py(\.disabled)?$/, '')
+    const moduleName = topModuleNameOf(selectedFile)
     setIsFileOpBusy(true)
     try {
       const result = await reloadPlugins(moduleName)
@@ -1555,6 +1557,7 @@ export default function PluginCcEditorPage() {
       }
       const pluginFiles = await pluginEditorApi.getPluginFiles()
       setFiles(pluginFiles)
+      setPluginInfoTick(tick => tick + 1)
       notification.success(t('editor.messages.reloadSuccess', { name: moduleName }))
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
@@ -1565,29 +1568,36 @@ export default function PluginCcEditorPage() {
     }
   }
 
-  // 启停目标：单文件插件切换自身，包插件切换其 __init__.py 入口
-  const pluginToggle = getPluginToggleTarget(files, selectedFile)
+  // 选中文件对应的已加载插件（启停复用插件管理的运行时开关，无需重载）
+  useEffect(() => {
+    if (!selectedFile) {
+      setPluginInfo(null)
+      return
+    }
+    let cancelled = false
+    getPlugins()
+      .then(plugins => {
+        if (!cancelled) setPluginInfo(findPluginByFile(plugins, selectedFile))
+      })
+      .catch(() => {
+        if (!cancelled) setPluginInfo(null)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [selectedFile, pluginInfoTick])
 
   const handleTogglePlugin = async () => {
-    if (!pluginToggle) return
-    const { isDisabled, sourcePath, targetPath } = pluginToggle
-    const action = isDisabled ? t('editor.messages.enabled') : t('editor.messages.disabled')
+    if (!pluginInfo) return
+    const nextEnabled = !pluginInfo.enabled
+    const action = nextEnabled ? t('editor.messages.enabled') : t('editor.messages.disabled')
     setIsFileOpBusy(true)
     try {
-      // 正在编辑被重命名的文件时用编辑器内容，否则读取磁盘内容
-      const content =
-        sourcePath === selectedFile ? code : await pluginEditorApi.getPluginFileContent(sourcePath)
-      if (content === null) {
-        throw new Error(t('editor.messages.loadContentFailed'))
+      const ok = await togglePluginEnabled(pluginInfo.id, nextEnabled)
+      if (!ok) {
+        throw new Error(t('editor.messages.unknownError'))
       }
-      await pluginEditorApi.savePluginFile(targetPath, content)
-      await pluginEditorApi.deletePluginFile(sourcePath)
-      const pluginFiles = await pluginEditorApi.getPluginFiles()
-      setFiles(pluginFiles)
-      if (sourcePath === selectedFile) {
-        setSelectedFile(targetPath)
-        setOriginalCode(code)
-      }
+      setPluginInfoTick(tick => tick + 1)
       notification.success(t('editor.messages.toggleSuccess', { action }))
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
@@ -1681,7 +1691,7 @@ export default function PluginCcEditorPage() {
             onReloadPlugin={() => setReloadPluginDialogOpen(true)}
             onTogglePlugin={() => setTogglePluginDialogOpen(true)}
             onDeletePlugin={() => setDeletePluginDialogOpen(true)}
-            pluginToggle={pluginToggle}
+            pluginEnabled={pluginInfo ? pluginInfo.enabled : null}
             onCodeChange={handleCodeChange}
             onClearProposal={handleClearProposal}
             onApplyProposal={handleApplyProposal}
@@ -1758,7 +1768,7 @@ export default function PluginCcEditorPage() {
       <Dialog open={togglePluginDialogOpen} onClose={() => setTogglePluginDialogOpen(false)}>
         <DialogTitle>
           {t('editor.dialogs.toggleTitle', {
-            action: pluginToggle?.isDisabled
+            action: pluginInfo?.enabled === false
               ? t('editor.messages.enabled')
               : t('editor.messages.disabled'),
           })}
@@ -1766,7 +1776,7 @@ export default function PluginCcEditorPage() {
         <DialogContent>
           <DialogContentText>
             {t('editor.dialogs.toggleMessage', {
-              action: pluginToggle?.isDisabled
+              action: pluginInfo?.enabled === false
                 ? t('editor.messages.enabled')
                 : t('editor.messages.disabled'),
             })}
@@ -1775,7 +1785,7 @@ export default function PluginCcEditorPage() {
         <DialogActions>
           <ActionButton onClick={() => setTogglePluginDialogOpen(false)}>{t('editor.cancel')}</ActionButton>
           <ActionButton tone="primary" onClick={handleTogglePlugin} disabled={isFileOpBusy}>
-            {pluginToggle?.isDisabled ? t('editor.enablePlugin') : t('editor.disablePlugin')}
+            {pluginInfo?.enabled === false ? t('editor.enablePlugin') : t('editor.disablePlugin')}
           </ActionButton>
         </DialogActions>
       </Dialog>

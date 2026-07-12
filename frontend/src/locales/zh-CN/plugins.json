@@ -204,7 +204,7 @@
     "reloadPlugin": "重载插件",
     "enablePlugin": "启用插件",
     "disablePlugin": "禁用插件",
-    "toggleUnavailable": "该插件缺少 __init__.py 入口，无法启停",
+    "toggleUnavailable": "插件未加载，无法启停",
     "deleteFile": "删除文件",
     "disabled": "已禁用",
     "fileManagement": "文件管理",
@@ -238,7 +238,7 @@
       "invalidModuleName": "无法获取有效的模块名",
       "reloadFailed": "重载插件失败",
       "reloadSuccess": "插件 {{name}} 重载成功",
-      "toggleSuccess": "插件{{action}}成功，请重载插件使更改生效",
+      "toggleSuccess": "插件{{action}}成功",
       "toggleFailed": "{{action}}插件失败",
       "codeCopied": "代码已复制到剪贴板",
       "generateCleared": "生成结果已清空",
@@ -273,7 +273,7 @@
       "reloadTitle": "确认重载",
       "reloadMessage": "确定要重载当前插件吗？这将重新初始化插件并应用代码变更。",
       "toggleTitle": "{{action}}插件",
-      "toggleMessage": "确定要{{action}}当前插件吗？{{action}}后需要重载插件才能生效。"
+      "toggleMessage": "确定要{{action}}当前插件吗？"
     },
     "generatorModes": {
       "basic": "基础生成",
