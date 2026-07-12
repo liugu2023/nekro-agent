@@ -57,7 +57,7 @@ import {
 import { pluginEditorApi } from '../../services/api/plugin-editor'
 import { getPlugins, Plugin, reloadPlugins, togglePluginEnabled } from '../../services/api/plugins'
 import PluginFileSelect from './plugin-file-select'
-import { findPluginByFile, topModuleNameOf } from './plugin-file-utils'
+import { findPluginByFile, isDisabledPluginEntry, topModuleNameOf } from './plugin-file-utils'
 import { useNotification } from '../../hooks/useNotification'
 import { BORDER_RADIUS, CARD_STYLES, CHIP_VARIANTS } from '../../theme/variants'
 
@@ -1053,6 +1053,11 @@ export default function PluginCcEditorPage() {
   const isInteractionLocked = isBusy || hasPendingProposal || hasRunningTask
   const canStopTask = Boolean(currentTaskId && (isGenerating || hasRunningTask))
   const canReconnectTaskStream = Boolean(currentTaskId && (isGenerating || hasRunningTask || isTaskStreamFallback))
+  const selectedPluginEnabled = pluginInfo
+    ? pluginInfo.enabled
+    : isDisabledPluginEntry(selectedFile)
+      ? false
+      : null
 
   const loadFiles = async () => {
     try {
@@ -1095,6 +1100,11 @@ export default function PluginCcEditorPage() {
           presets[0] ??
           null
       )
+      if (nextStatus.active_task_id && pollingTaskIdRef.current !== nextStatus.active_task_id) {
+        setActiveTaskId(nextStatus.active_task_id)
+        restoredTaskIdRef.current = null
+        startTaskStream(nextStatus.active_task_id)
+      }
     } catch (error) {
       setStatus(null)
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
@@ -1390,9 +1400,11 @@ export default function PluginCcEditorPage() {
       const template = await pluginEditorApi.generatePluginTemplate(name, description)
       const selectedPluginFile = newPluginCreateMode === 'folder' ? `${name}/plugin.py` : `${name}.py`
       const latestPluginFiles = await pluginEditorApi.getPluginFiles()
-      const pluginAlreadyExists = newPluginCreateMode === 'folder'
-        ? latestPluginFiles.some(filePath => filePath.startsWith(`${name}/`))
-        : latestPluginFiles.some(filePath => filePath === `${name}.py` || filePath === `${name}.py.disabled`)
+      const pluginAlreadyExists = latestPluginFiles.some(filePath =>
+        filePath === `${name}.py` ||
+        filePath === `${name}.py.disabled` ||
+        filePath.startsWith(`${name}/`)
+      )
       if (pluginAlreadyExists) {
         notification.error(t('editor.validation.pluginAlreadyExists'))
         return
@@ -1417,11 +1429,13 @@ export default function PluginCcEditorPage() {
       } else {
         await pluginEditorApi.savePluginFile(selectedPluginFile, template)
       }
-      const pluginFiles = await pluginEditorApi.getPluginFiles()
       stopTaskStream()
       stopTaskPolling()
       restoredTaskIdRef.current = null
-      setFiles(pluginFiles)
+      const createdFiles = newPluginCreateMode === 'folder'
+        ? [`${name}/__init__.py`, selectedPluginFile]
+        : [selectedPluginFile]
+      setFiles(current => [...new Set([...current, ...createdFiles])].sort())
       setSelectedFile(selectedPluginFile)
       setCode(template)
       setOriginalCode(template)
@@ -1434,6 +1448,12 @@ export default function PluginCcEditorPage() {
       setNewPluginDescription('')
       setNewPluginCreateMode('file')
       notification.success(t('editor.messages.createSuccess'))
+      try {
+        setFiles(await pluginEditorApi.getPluginFiles())
+      } catch (refreshError) {
+        const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+        notification.warning(`${t('editor.messages.createRefreshFailed')}: ${message}`)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.messages.createFailed')}: ${message}`)
@@ -1481,6 +1501,7 @@ export default function PluginCcEditorPage() {
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       setTask(previousTask)
+      setPrompt(current => current || submittedPrompt)
       setIsGenerating(false)
       notification.error(`${t('editor.messages.pluginDevGenerateFailed')}: ${message}`)
     }
@@ -1511,25 +1532,29 @@ export default function PluginCcEditorPage() {
   }
 
   const handleClearProposal = async () => {
-    const currentTask = task
+    let currentTask = task
     const taskId = currentTask?.task_id || activeTaskId
 
-    stopTaskPolling()
-    restoredTaskIdRef.current = null
-    syncedCandidateKeyRef.current = ''
-    stopTaskStream()
-
     try {
-      if (taskId && (isGenerating || (currentTask && RUNNING_TASK_STATUSES.has(currentTask.status)))) {
+      if (taskId && !currentTask) {
+        currentTask = await pluginDevApi.getTask(taskId)
+        setTask(currentTask)
+      }
+      if (taskId && currentTask && (isGenerating || RUNNING_TASK_STATUSES.has(currentTask.status))) {
         await pluginDevApi.cancelTask(taskId)
       } else if (currentTask?.proposal_id && currentTask.status === 'waiting_apply') {
         await pluginDevApi.discardProposal(currentTask.proposal_id)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
-      notification.error(message)
+      notification.error(`${t('editor.messages.clearProposalFailed')}: ${message}`)
+      return
     }
 
+    stopTaskPolling()
+    restoredTaskIdRef.current = null
+    syncedCandidateKeyRef.current = ''
+    stopTaskStream()
     setTask(null)
     setActiveTaskId('')
     setGeneratedCode('')
@@ -1546,21 +1571,28 @@ export default function PluginCcEditorPage() {
     setIsApplyingProposal(true)
     try {
       const response = await pluginDevApi.applyProposal(proposalId)
-      const content = await pluginEditorApi.getPluginFileContent(proposalFile)
-      // 多文件提案可能新增了包内文件，应用后刷新文件列表
-      const pluginFiles = await pluginEditorApi.getPluginFiles()
-      setFiles(pluginFiles)
-      setSelectedFile(proposalFile)
-      setCode(content || '')
-      setOriginalCode(content || '')
       setTask(prev => prev ? { ...prev, status: 'applied' } : prev)
       setActiveTaskId('')
       syncedCandidateKeyRef.current = ''
-      setGeneratedCode(content || '')
-      if (historyOpen) {
-        await loadHistoryForFile(proposalFile)
-      }
       notification.success(t('editor.messages.pluginDevProposalApplied', { version: response.version_id }))
+
+      try {
+        const [content, pluginFiles] = await Promise.all([
+          pluginEditorApi.getPluginFileContent(proposalFile),
+          pluginEditorApi.getPluginFiles(),
+        ])
+        setFiles(pluginFiles)
+        setSelectedFile(proposalFile)
+        setCode(content || '')
+        setOriginalCode(content || '')
+        setGeneratedCode(content || '')
+        if (historyOpen) {
+          await loadHistoryForFile(proposalFile)
+        }
+      } catch (refreshError) {
+        const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+        notification.warning(`${t('editor.messages.applyRefreshFailed')}: ${message}`)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.messages.applyFailed')}: ${message}`)
@@ -1612,14 +1644,26 @@ export default function PluginCcEditorPage() {
   }, [selectedFile, pluginInfoTick])
 
   const handleTogglePlugin = async () => {
-    if (!pluginInfo) return
-    const nextEnabled = !pluginInfo.enabled
+    if (selectedPluginEnabled === null) return
+    const nextEnabled = !selectedPluginEnabled
     const action = nextEnabled ? t('editor.messages.enabled') : t('editor.messages.disabled')
     setIsFileOpBusy(true)
     try {
-      const ok = await togglePluginEnabled(pluginInfo.id, nextEnabled)
-      if (!ok) {
-        throw new Error(t('editor.messages.unknownError'))
+      if (pluginInfo) {
+        const ok = await togglePluginEnabled(pluginInfo.id, nextEnabled)
+        if (!ok) {
+          throw new Error(t('editor.messages.unknownError'))
+        }
+      } else {
+        const result = await pluginEditorApi.togglePluginFile(selectedFile)
+        setFiles(current => current.map(filePath => filePath === selectedFile ? result.file_path : filePath).sort())
+        setSelectedFile(result.file_path)
+        try {
+          setFiles(await pluginEditorApi.getPluginFiles())
+        } catch (refreshError) {
+          const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+          notification.warning(`${t('editor.messages.loadFileListFailed')}: ${message}`)
+        }
       }
       setPluginInfoTick(tick => tick + 1)
       notification.success(t('editor.messages.toggleSuccess', { action }))
@@ -1715,7 +1759,7 @@ export default function PluginCcEditorPage() {
             onReloadPlugin={() => setReloadPluginDialogOpen(true)}
             onTogglePlugin={() => setTogglePluginDialogOpen(true)}
             onDeletePlugin={() => setDeletePluginDialogOpen(true)}
-            pluginEnabled={pluginInfo ? pluginInfo.enabled : null}
+            pluginEnabled={selectedPluginEnabled}
             onCodeChange={handleCodeChange}
             onClearProposal={handleClearProposal}
             onApplyProposal={handleApplyProposal}
@@ -1792,7 +1836,7 @@ export default function PluginCcEditorPage() {
       <Dialog open={togglePluginDialogOpen} onClose={() => setTogglePluginDialogOpen(false)}>
         <DialogTitle>
           {t('editor.dialogs.toggleTitle', {
-            action: pluginInfo?.enabled === false
+            action: selectedPluginEnabled === false
               ? t('editor.messages.enabled')
               : t('editor.messages.disabled'),
           })}
@@ -1800,7 +1844,7 @@ export default function PluginCcEditorPage() {
         <DialogContent>
           <DialogContentText>
             {t('editor.dialogs.toggleMessage', {
-              action: pluginInfo?.enabled === false
+              action: selectedPluginEnabled === false
                 ? t('editor.messages.enabled')
                 : t('editor.messages.disabled'),
             })}
@@ -1809,7 +1853,7 @@ export default function PluginCcEditorPage() {
         <DialogActions>
           <ActionButton onClick={() => setTogglePluginDialogOpen(false)}>{t('editor.cancel')}</ActionButton>
           <ActionButton tone="primary" onClick={handleTogglePlugin} disabled={isFileOpBusy}>
-            {pluginInfo?.enabled === false ? t('editor.enablePlugin') : t('editor.disablePlugin')}
+            {selectedPluginEnabled === false ? t('editor.enablePlugin') : t('editor.disablePlugin')}
           </ActionButton>
         </DialogActions>
       </Dialog>

@@ -12,6 +12,8 @@ export interface PluginEditorApi {
   savePluginFile: (filePath: string, content: string) => Promise<void>
   // 删除插件文件
   deletePluginFile: (filePath: string) => Promise<void>
+  // 切换禁用文件名（.py <-> .py.disabled）
+  togglePluginFile: (filePath: string) => Promise<{ ok: boolean; file_path: string }>
   // 导出插件文件
   exportPluginFile: (filePath: string) => Promise<void>
   // 生成插件代码
@@ -61,6 +63,16 @@ export const pluginEditorApi: PluginEditorApi = {
     if (!response.data.ok) {
       throw new Error('删除插件文件失败')
     }
+  },
+
+  togglePluginFile: async (filePath: string): Promise<{ ok: boolean; file_path: string }> => {
+    const response = await axios.post<{ ok: boolean; file_path: string }>(
+      `/plugin-editor/toggle/${encodePathParam(filePath)}`
+    )
+    if (!response.data.ok) {
+      throw new Error('切换插件文件状态失败')
+    }
+    return response.data
   },
 
   // 导出插件文件
@@ -129,6 +141,7 @@ export const getPluginFiles = pluginEditorApi.getPluginFiles
 export const getPluginFileContent = pluginEditorApi.getPluginFileContent
 export const savePluginFile = pluginEditorApi.savePluginFile
 export const deletePluginFile = pluginEditorApi.deletePluginFile
+export const togglePluginFile = pluginEditorApi.togglePluginFile
 export const exportPluginFile = pluginEditorApi.exportPluginFile
 export const generatePluginCode = pluginEditorApi.generatePluginCode
 export const generatePluginTemplate = pluginEditorApi.generatePluginTemplate

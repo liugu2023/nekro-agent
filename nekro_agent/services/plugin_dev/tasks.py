@@ -35,6 +35,7 @@ from nekro_agent.services.plugin_dev.versioning import (
     get_version_info,
     record_version,
     remove_version_record,
+    rollback,
     utc_now_iso,
 )
 
@@ -42,6 +43,7 @@ logger = get_sub_logger("plugin_dev_tasks")
 
 _TASK_HANDLES: dict[str, asyncio.Task[None]] = {}
 _TASK_QUEUE_LOCK = asyncio.Lock()
+_PLUGIN_DEV_MUTATION_LOCK = asyncio.Lock()
 _ACTIVE_TASK_ID: str | None = None
 _MAX_SELF_CHECK_REPAIR_ATTEMPTS = 3
 _REQUIRED_SANDBOX_WRITE_TOOLS = {"write", "edit", "multiedit"}
@@ -541,6 +543,7 @@ def _build_plugin_dev_instruction(
             f"插件自检命令：{self_check_command}",
             "内部插件文件网关：如需读取真实插件文件或提交写入提案，使用环境变量 NEKRO_PLUGIN_DEV_INTERNAL_API_BASE；请求头 X-Internal-API-Token 使用 INTERNAL_API_TOKEN。",
             "通过内部网关创建 proposal 时，task_id 必须使用上方任务 ID，content 必须是完整插件文件内容；包形式插件请在请求体 files 数组中提交包内全部 .py 文件（[{file_path, content}]）。",
+            "包内被删除的 .py 文件必须仅放入 deleted_files 数组；files 只包含候选中仍存在或需要写入的文件。调用内部 /check 时也使用相同的 files/deleted_files 语义。",
             "内部网关仅允许获取版本、列出文件、读取文件、执行自检和创建 proposal，不允许直接写入真实插件文件。",
             "",
             "当前代码快照：",
@@ -1039,9 +1042,17 @@ async def create_task(body: PluginDevGenerateRequest) -> PluginDevTaskResponse:
 
 
 async def apply_proposal(proposal_id: str) -> str:
+    async with _PLUGIN_DEV_MUTATION_LOCK:
+        return await _apply_proposal_unlocked(proposal_id)
+
+
+async def _apply_proposal_unlocked(proposal_id: str) -> str:
     proposal = get_proposal(proposal_id)
     if proposal.status != "pending":
         raise ValidationError(reason="该提案已处理")
+    task = get_task(proposal.task_id)
+    if task.status != "waiting_apply" or task.proposal_id != proposal_id:
+        raise ValidationError(reason="任务状态与待应用提案不一致，请刷新任务状态后重试")
 
     entries = list(proposal.files) or [
         PluginDevProposalFile(
@@ -1085,6 +1096,19 @@ async def apply_proposal(proposal_id: str) -> str:
     if not check_report.ok:
         raise ValidationError(reason=f"插件复核未通过: {summarize_plugin_check(check_report)}")
 
+    # smoke 可能运行较长时间；真实写入前必须重新读取，避免检查期间的外部修改被覆盖。
+    for entry in entries:
+        try:
+            current = read_plugin_file(entry.file_path)
+            current_exists = True
+        except NotFoundError:
+            current = ""
+            current_exists = False
+        if current_exists != before_exists[entry.file_path] or current != before_map[entry.file_path]:
+            raise ValidationError(
+                reason=f"插件文件 {entry.file_path} 在复核期间已被修改，为避免覆盖新的改动，请丢弃该提案并重新生成"
+            )
+
     version_ids: dict[str, str] = {}
     applied_entries: list[PluginDevProposalFile] = []
     try:
@@ -1101,15 +1125,20 @@ async def apply_proposal(proposal_id: str) -> str:
                 action="apply_plugin_dev_proposal",
                 before_content=before_map[entry.file_path],
                 after_content="" if entry.action == "delete" else entry.content,
+                before_exists=before_exists[entry.file_path],
+                after_exists=entry.action != "delete",
                 summary=proposal.summary,
             )
     except Exception:
         for entry in reversed(applied_entries):
-            before_content = before_map[entry.file_path]
-            if not before_exists[entry.file_path]:
-                resolve_plugin_file(entry.file_path).unlink(missing_ok=True)
-            else:
-                write_plugin_file(entry.file_path, before_content)
+            try:
+                before_content = before_map[entry.file_path]
+                if not before_exists[entry.file_path]:
+                    resolve_plugin_file(entry.file_path).unlink(missing_ok=True)
+                else:
+                    write_plugin_file(entry.file_path, before_content)
+            except Exception as restore_error:
+                logger.error(f"恢复插件文件失败: {entry.file_path}: {restore_error}")
         for recorded_file_path, recorded_version_id in reversed(list(version_ids.items())):
             try:
                 remove_version_record(recorded_file_path, recorded_version_id)
@@ -1186,6 +1215,7 @@ def recover_stale_plugin_dev_tasks() -> int:
         logs.append("检测到服务重启，任务已标记为失败")
         data["logs"] = logs
         _save_task(task_id, data)
+        _discard_other_pending_proposals(task_id, None)
         recovered += 1
     if recovered:
         logger.info(f"已回收 {recovered} 个因服务重启中断的插件开发任务")
@@ -1240,17 +1270,23 @@ def cleanup_plugin_dev_artifacts() -> tuple[int, int]:
     return removed_tasks, removed_proposals
 
 
-def discard_proposal(proposal_id: str) -> None:
-    proposal = get_proposal(proposal_id)
-    if proposal.status != "pending":
-        raise ValidationError(reason="该提案已处理")
-    data = proposal.model_dump()
-    data["status"] = "discarded"
-    _write_json(_proposal_path(proposal_id), data)
+async def discard_proposal(proposal_id: str) -> None:
+    async with _PLUGIN_DEV_MUTATION_LOCK:
+        proposal = get_proposal(proposal_id)
+        if proposal.status != "pending":
+            raise ValidationError(reason="该提案已处理")
+        data = proposal.model_dump()
+        data["status"] = "discarded"
+        _write_json(_proposal_path(proposal_id), data)
 
-    task_path = _task_path(proposal.task_id)
-    if task_path.exists():
-        task_data = _read_json(task_path, {})
-        task_data["status"] = "cancelled"
-        task_data.setdefault("logs", []).append("提案已丢弃")
-        _save_task(proposal.task_id, task_data)
+        task_path = _task_path(proposal.task_id)
+        if task_path.exists():
+            task_data = _read_json(task_path, {})
+            task_data["status"] = "cancelled"
+            task_data.setdefault("logs", []).append("提案已丢弃")
+            _save_task(proposal.task_id, task_data)
+
+
+async def rollback_plugin_file(file_path: str, version_id: str, target: str) -> str:
+    async with _PLUGIN_DEV_MUTATION_LOCK:
+        return rollback(file_path, version_id, target)

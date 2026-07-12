@@ -168,6 +168,8 @@ class PluginDevHistoryItem(BaseModel):
     action: str
     before_sha256: str
     after_sha256: str
+    before_exists: bool = True
+    after_exists: bool = True
     plugin_api_version: str
     nekro_agent_git_commit: str
     created_at: str

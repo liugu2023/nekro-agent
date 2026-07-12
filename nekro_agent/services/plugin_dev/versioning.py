@@ -12,7 +12,13 @@ from nekro_agent.schemas.plugin_dev import (
     PluginDevVersionInfo,
     PluginDevVersionUpdate,
 )
-from nekro_agent.services.plugin_dev.host_file_gateway import safe_file_slug, sha256_text, write_plugin_file
+from nekro_agent.services.plugin_dev.host_file_gateway import (
+    read_plugin_file,
+    resolve_plugin_file,
+    safe_file_slug,
+    sha256_text,
+    write_plugin_file,
+)
 from nekro_agent.services.plugin_dev.paths import PLUGIN_DEV_HISTORY_DIR, PLUGIN_DEV_VERSION_PATH
 
 
@@ -125,17 +131,25 @@ def _manifest_path(file_path: str) -> Path:
 _MAX_VERSIONS_PER_FILE = 50
 
 
-def _prune_versions(history_dir: Path, versions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _partition_versions_for_prune(
+    versions: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if len(versions) <= _MAX_VERSIONS_PER_FILE:
-        return versions
-    pruned, kept = versions[:-_MAX_VERSIONS_PER_FILE], versions[-_MAX_VERSIONS_PER_FILE:]
-    for item in pruned:
+        return [], versions
+    return versions[:-_MAX_VERSIONS_PER_FILE], versions[-_MAX_VERSIONS_PER_FILE:]
+
+
+def _delete_version_snapshots(history_dir: Path, versions: list[dict[str, Any]]) -> None:
+    for item in versions:
         old_version_id = str(item.get("version_id") or "")
         if not old_version_id:
             continue
         for suffix in ("before", "after"):
-            (history_dir / f"{old_version_id}-{suffix}.py").unlink(missing_ok=True)
-    return kept
+            try:
+                (history_dir / f"{old_version_id}-{suffix}.py").unlink(missing_ok=True)
+            except OSError:
+                # manifest 已提交后，旧快照清理失败只会遗留无引用文件，不能反向破坏新版本记录。
+                continue
 
 
 def get_history(file_path: str) -> PluginDevHistoryResponse:
@@ -158,6 +172,8 @@ def record_version(
     action: str,
     before_content: str,
     after_content: str,
+    before_exists: bool = True,
+    after_exists: bool = True,
     summary: str,
 ) -> str:
     version = get_version_info()
@@ -174,6 +190,8 @@ def record_version(
         action=action,
         before_sha256=sha256_text(before_content),
         after_sha256=sha256_text(after_content),
+        before_exists=before_exists,
+        after_exists=after_exists,
         plugin_api_version=version.plugin_api_version,
         nekro_agent_git_commit=version.nekro_agent_git_commit,
         created_at=utc_now_iso(),
@@ -187,13 +205,15 @@ def record_version(
         manifest = _read_json(manifest_path, {"file_path": file_path, "current_version_id": None, "versions": []})
         versions = list(manifest.get("versions", []))
         versions.append(item.model_dump())
-        manifest["versions"] = _prune_versions(history_dir, versions)
+        pruned, kept = _partition_versions_for_prune(versions)
+        manifest["versions"] = kept
         manifest["current_version_id"] = version_id
         _write_json(manifest_path, manifest)
     except Exception:
         before_path.unlink(missing_ok=True)
         after_path.unlink(missing_ok=True)
         raise
+    _delete_version_snapshots(history_dir, pruned)
     return version_id
 
 
@@ -213,29 +233,42 @@ def remove_version_record(file_path: str, version_id: str) -> None:
 
 def rollback(file_path: str, version_id: str, target: str) -> str:
     history = get_history(file_path)
-    if version_id not in {item.version_id for item in history.versions}:
+    history_item = next((item for item in history.versions if item.version_id == version_id), None)
+    if history_item is None:
         raise NotFoundError(resource=f"文件 {file_path} 的版本 {version_id}")
 
     history_dir = _history_dir(file_path)
     source = history_dir / f"{version_id}-{target}.py"
-    if not source.exists():
+    target_exists = history_item.before_exists if target == "before" else history_item.after_exists
+    if target_exists and not source.exists():
         raise NotFoundError(resource=f"版本 {version_id}")
-
-    current = ""
-    from nekro_agent.services.plugin_dev.host_file_gateway import read_plugin_file
 
     try:
         current = read_plugin_file(file_path)
-    except Exception:
+        current_exists = True
+    except NotFoundError:
         current = ""
-    restored = source.read_text(encoding="utf-8")
-    new_version_id = record_version(
-        file_path=file_path,
-        task_id=f"rollback-{version_id}",
-        action="rollback",
-        before_content=current,
-        after_content=restored,
-        summary=f"回退到 {version_id} 的 {target} 内容",
-    )
-    write_plugin_file(file_path, restored)
-    return new_version_id
+        current_exists = False
+    restored = source.read_text(encoding="utf-8") if target_exists else ""
+
+    if target_exists:
+        write_plugin_file(file_path, restored)
+    else:
+        resolve_plugin_file(file_path).unlink(missing_ok=True)
+    try:
+        return record_version(
+            file_path=file_path,
+            task_id=f"rollback-{version_id}",
+            action="rollback",
+            before_content=current,
+            after_content=restored,
+            before_exists=current_exists,
+            after_exists=target_exists,
+            summary=f"回退到 {version_id} 的 {target} 内容",
+        )
+    except Exception:
+        if current_exists:
+            write_plugin_file(file_path, current)
+        else:
+            resolve_plugin_file(file_path).unlink(missing_ok=True)
+        raise

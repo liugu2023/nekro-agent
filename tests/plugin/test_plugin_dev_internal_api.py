@@ -685,6 +685,12 @@ async def test_plugin_dev_apply_proposal_rejects_concurrent_modification(tmp_pat
         after="plugin = 'updated'\n",
         summary="更新插件",
     )
+    _write_plugin_dev_task_file(
+        task_dir,
+        "apply-test",
+        "waiting_apply",
+        proposal_id=proposal.proposal_id,
+    )
     assert proposal.before_sha256 == sha256_text("plugin = None\n")
 
     plugin_file.write_text("plugin = 'changed-by-user'\n", encoding="utf-8")
@@ -702,16 +708,23 @@ async def test_plugin_dev_apply_proposal_rejects_concurrent_modification(tmp_pat
     assert checked_levels == ["smoke"]
 
 
-def _write_plugin_dev_task_file(task_dir: Path, task_id: str, status: str) -> None:
+def _write_plugin_dev_task_file(
+    task_dir: Path,
+    task_id: str,
+    status: str,
+    *,
+    file_path: str = "demo.py",
+    proposal_id: str | None = None,
+) -> None:
     (task_dir / f"{task_id}.json").write_text(
         json.dumps(
             {
                 "task_id": task_id,
-                "file_path": "demo.py",
+                "file_path": file_path,
                 "status": status,
                 "summary": "",
                 "logs": [],
-                "proposal_id": None,
+                "proposal_id": proposal_id,
                 "diff": "",
                 "result_code": "",
                 "error": "",
@@ -775,8 +788,23 @@ def test_plugin_dev_recover_stale_tasks_marks_them_failed(tmp_path: Path, monkey
     from nekro_agent.services.plugin_dev import tasks
 
     task_dir = tmp_path / "tasks"
+    proposal_dir = tmp_path / "proposals"
     task_dir.mkdir()
-    _write_plugin_dev_task_file(task_dir, "stale-running", "running_cc")
+    proposal_dir.mkdir()
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    stale_proposal = tasks.create_proposal(
+        task_id="stale-running",
+        file_path="demo.py",
+        before="plugin = None\n",
+        after="plugin = 'stale'\n",
+        summary="重启前遗留提案",
+    )
+    _write_plugin_dev_task_file(
+        task_dir,
+        "stale-running",
+        "running_cc",
+        proposal_id=stale_proposal.proposal_id,
+    )
     _write_plugin_dev_task_file(task_dir, "stale-pending", "pending")
     _write_plugin_dev_task_file(task_dir, "done-task", "applied")
 
@@ -791,6 +819,7 @@ def test_plugin_dev_recover_stale_tasks_marks_them_failed(tmp_path: Path, monkey
         assert "服务重启" in data["error"]
     done_data = json.loads((task_dir / "done-task.json").read_text(encoding="utf-8"))
     assert done_data["status"] == "applied"
+    assert tasks.get_proposal(stale_proposal.proposal_id).status == "discarded"
 
 
 @pytest.mark.asyncio
@@ -1106,6 +1135,14 @@ async def test_plugin_dev_apply_multi_file_proposal_atomically(tmp_path: Path, m
         },
     )
 
+    _write_plugin_dev_task_file(
+        task_dir,
+        "apply-multi-test",
+        "waiting_apply",
+        file_path="mypkg/plugin.py",
+        proposal_id=proposal.proposal_id,
+    )
+
     # 提案创建后其中一个文件被外部修改 → 全部拒绝、任何文件都不写入
     (pkg_dir / "utils.py").write_text("VALUE = 999\n", encoding="utf-8")
     with pytest.raises(ValidationError):
@@ -1212,13 +1249,16 @@ async def test_plugin_dev_apply_package_file_deletion(tmp_path: Path, monkeypatc
 
     plugin_root = tmp_path / "plugins"
     proposal_dir = tmp_path / "proposals"
+    task_dir = tmp_path / "tasks"
     plugin_root.mkdir()
+    task_dir.mkdir()
     pkg_dir = plugin_root / "mypkg"
     pkg_dir.mkdir()
     (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
     (pkg_dir / "legacy.py").write_text("OLD = 1\n", encoding="utf-8")
     monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
     monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_TASK_DIR", task_dir)
 
     checked_deleted_files: list[set[str]] = []
 
@@ -1242,6 +1282,13 @@ async def test_plugin_dev_apply_package_file_deletion(tmp_path: Path, monkeypatc
         deleted_files={"mypkg/legacy.py"},
     )
 
+    _write_plugin_dev_task_file(
+        task_dir,
+        "delete-package-file",
+        "waiting_apply",
+        file_path="mypkg/plugin.py",
+        proposal_id=proposal.proposal_id,
+    )
     assert any(item.file_path == "mypkg/legacy.py" and item.action == "delete" for item in proposal.files)
     await tasks.apply_proposal(proposal.proposal_id)
 
@@ -1256,13 +1303,16 @@ async def test_plugin_dev_apply_record_failure_restores_files_and_history(tmp_pa
 
     plugin_root = tmp_path / "plugins"
     proposal_dir = tmp_path / "proposals"
+    task_dir = tmp_path / "tasks"
     plugin_root.mkdir()
+    task_dir.mkdir()
     pkg_dir = plugin_root / "mypkg"
     pkg_dir.mkdir()
     (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
     (pkg_dir / "utils.py").write_text("VALUE = 0\n", encoding="utf-8")
     monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
     monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_TASK_DIR", task_dir)
 
     async def fake_check(file_path: str, code: str, **_kwargs):
         return PluginCheckReport(
@@ -1298,6 +1348,13 @@ async def test_plugin_dev_apply_record_failure_restores_files_and_history(tmp_pa
         extra_files={"mypkg/utils.py": ("VALUE = 0\n", "VALUE = 1\n")},
     )
 
+    _write_plugin_dev_task_file(
+        task_dir,
+        "record-failure",
+        "waiting_apply",
+        file_path="mypkg/plugin.py",
+        proposal_id=proposal.proposal_id,
+    )
     with pytest.raises(OSError, match="history write failed"):
         await tasks.apply_proposal(proposal.proposal_id)
 
@@ -1305,3 +1362,99 @@ async def test_plugin_dev_apply_record_failure_restores_files_and_history(tmp_pa
     assert (pkg_dir / "utils.py").read_text(encoding="utf-8") == "VALUE = 0\n"
     assert removed_records == [("mypkg/plugin.py", "version-first")]
     assert tasks.get_proposal(proposal.proposal_id).status == "pending"
+
+
+def test_plugin_dev_rejects_internal_path_aliases(tmp_path: Path, monkeypatch):
+    from nekro_agent.schemas.errors import ValidationError
+    from nekro_agent.services.plugin_dev.host_file_gateway import normalize_plugin_file_path
+
+    plugin_root = tmp_path / "plugins"
+    plugin_root.mkdir()
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+
+    for file_path in ("pkg/../victim.py", "pkg/./helper.py", "pkg//helper.py", "pkg\\helper.py"):
+        with pytest.raises(ValidationError):
+            normalize_plugin_file_path(file_path)
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_apply_rechecks_after_smoke(tmp_path: Path, monkeypatch):
+    from nekro_agent.schemas.errors import ValidationError
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
+    from nekro_agent.services.plugin_dev import tasks
+
+    plugin_root = tmp_path / "plugins"
+    proposal_dir = tmp_path / "proposals"
+    task_dir = tmp_path / "tasks"
+    plugin_root.mkdir()
+    task_dir.mkdir()
+    plugin_file = plugin_root / "demo.py"
+    plugin_file.write_text("plugin = None\n", encoding="utf-8")
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_TASK_DIR", task_dir)
+
+    async def fake_check(file_path: str, code: str, **_kwargs):
+        plugin_file.write_text("plugin = 'external'\n", encoding="utf-8")
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    monkeypatch.setattr(tasks, "run_plugin_self_check", fake_check)
+    proposal = tasks.create_proposal(
+        task_id="toctou-test",
+        file_path="demo.py",
+        before="plugin = None\n",
+        after="plugin = 'updated'\n",
+        summary="二次校验",
+    )
+    _write_plugin_dev_task_file(
+        task_dir,
+        "toctou-test",
+        "waiting_apply",
+        proposal_id=proposal.proposal_id,
+    )
+
+    with pytest.raises(ValidationError, match="复核期间已被修改"):
+        await tasks.apply_proposal(proposal.proposal_id)
+    assert plugin_file.read_text(encoding="utf-8") == "plugin = 'external'\n"
+
+
+def test_plugin_dev_rollback_restores_file_existence(tmp_path: Path, monkeypatch):
+    from nekro_agent.services.plugin_dev import versioning
+
+    plugin_root = tmp_path / "plugins"
+    history_root = tmp_path / "history"
+    plugin_root.mkdir()
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+    monkeypatch.setattr(versioning, "PLUGIN_DEV_HISTORY_DIR", history_root)
+
+    new_file = plugin_root / "new_file.py"
+    new_file.write_text("VALUE = 1\n", encoding="utf-8")
+    created_version = versioning.record_version(
+        file_path="new_file.py",
+        task_id="create",
+        action="apply",
+        before_content="",
+        after_content="VALUE = 1\n",
+        before_exists=False,
+        after_exists=True,
+        summary="新建文件",
+    )
+    versioning.rollback("new_file.py", created_version, "before")
+    assert not new_file.exists()
+
+    deleted_version = versioning.record_version(
+        file_path="old_file.py",
+        task_id="delete",
+        action="apply",
+        before_content="OLD = 1\n",
+        after_content="",
+        before_exists=True,
+        after_exists=False,
+        summary="删除文件",
+    )
+    versioning.rollback("old_file.py", deleted_version, "before")
+    assert (plugin_root / "old_file.py").read_text(encoding="utf-8") == "OLD = 1\n"

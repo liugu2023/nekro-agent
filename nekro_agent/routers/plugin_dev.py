@@ -33,6 +33,7 @@ from nekro_agent.schemas.plugin_dev import (
 from nekro_agent.services.plugin_dev.config import get_plugin_dev_config, update_plugin_dev_config
 from nekro_agent.services.plugin_dev.host_file_gateway import (
     list_plugin_files,
+    normalize_plugin_file_path,
     plugin_top_dir,
     read_plugin_file,
     resolve_plugin_file,
@@ -50,8 +51,9 @@ from nekro_agent.services.plugin_dev.tasks import (
     get_task,
     get_task_file_mtime,
     get_task_runtime_snapshot,
+    rollback_plugin_file,
 )
-from nekro_agent.services.plugin_dev.versioning import get_history, get_version_info, rollback, update_version_info
+from nekro_agent.services.plugin_dev.versioning import get_history, get_version_info, update_version_info
 from nekro_agent.services.runtime_state import is_shutting_down
 from nekro_agent.services.user.deps import get_current_active_user
 from nekro_agent.services.user.perm import Role, require_role
@@ -68,42 +70,50 @@ def _validate_internal_file_set(
     primary_file_path: str,
     files: list[PluginDevInternalFilePayload],
     deleted_files: list[str],
-) -> tuple[dict[str, str], set[str]]:
+) -> tuple[str, dict[str, str], set[str]]:
     """校验多文件 payload：路径合法、与主文件同插件根、大小与数量受限。
 
     返回主文件之外的文件集 {file_path: content}。
     """
     if len(files) + len(deleted_files) > _MAX_INTERNAL_PROPOSAL_FILES:
         raise ValidationError(reason=f"文件数量超过上限（{_MAX_INTERNAL_PROPOSAL_FILES} 个）")
-    top_dir = plugin_top_dir(primary_file_path)
-    if top_dir is None and any(item.file_path != primary_file_path for item in files):
-        raise ValidationError(reason="单文件插件任务只允许提交目标文件本身")
+    normalized_primary = normalize_plugin_file_path(primary_file_path)
+    top_dir = plugin_top_dir(normalized_primary)
 
     total_bytes = 0
     extra: dict[str, str] = {}
+    written_paths: set[str] = set()
     for item in files:
-        resolve_plugin_file(item.file_path)
-        if top_dir is not None and plugin_top_dir(item.file_path) != top_dir:
-            raise ValidationError(reason=f"文件 {item.file_path} 不在插件目录 {top_dir}/ 内")
+        normalized_path = normalize_plugin_file_path(item.file_path)
+        if normalized_path in written_paths:
+            raise ValidationError(reason=f"文件 {normalized_path} 在 files 中重复提交")
+        written_paths.add(normalized_path)
+        if top_dir is None and normalized_path != normalized_primary:
+            raise ValidationError(reason="单文件插件任务只允许提交目标文件本身")
+        if top_dir is not None and plugin_top_dir(normalized_path) != top_dir:
+            raise ValidationError(reason=f"文件 {normalized_path} 不在插件目录 {top_dir}/ 内")
         content_bytes = len(item.content.encode("utf-8"))
         if content_bytes > _MAX_INTERNAL_PROPOSAL_BYTES:
-            raise ValidationError(reason=f"文件 {item.file_path} 内容过大")
+            raise ValidationError(reason=f"文件 {normalized_path} 内容过大")
         total_bytes += content_bytes
-        if item.file_path != primary_file_path:
-            extra[item.file_path] = item.content
+        if normalized_path == normalized_primary:
+            continue
+        extra[normalized_path] = item.content
     deleted: set[str] = set()
     for deleted_path in deleted_files:
-        resolve_plugin_file(deleted_path)
-        if deleted_path == primary_file_path:
+        normalized_path = normalize_plugin_file_path(deleted_path)
+        if normalized_path in deleted:
+            raise ValidationError(reason=f"文件 {normalized_path} 在 deleted_files 中重复提交")
+        if normalized_path == normalized_primary:
             raise ValidationError(reason="不能删除任务主目标文件")
-        if top_dir is None or plugin_top_dir(deleted_path) != top_dir:
-            raise ValidationError(reason=f"删除文件 {deleted_path} 不在任务插件范围内")
-        if deleted_path in extra:
-            raise ValidationError(reason=f"文件 {deleted_path} 不能同时写入和删除")
-        deleted.add(deleted_path)
+        if top_dir is None or plugin_top_dir(normalized_path) != top_dir:
+            raise ValidationError(reason=f"删除文件 {normalized_path} 不在任务插件范围内")
+        if normalized_path in written_paths:
+            raise ValidationError(reason=f"文件 {normalized_path} 不能同时写入和删除")
+        deleted.add(normalized_path)
     if total_bytes > _MAX_INTERNAL_PROPOSAL_TOTAL_BYTES:
         raise ValidationError(reason="文件集总大小超过上限（2MB）")
-    return extra, deleted
+    return normalized_primary, extra, deleted
 
 
 def _extract_bearer_token(authorization: str | None) -> str:
@@ -178,8 +188,9 @@ async def get_internal_plugin_files() -> list[str]:
 async def get_internal_plugin_file(
     path: str = Query(..., min_length=1),
 ) -> PluginDevInternalFileResponse:
-    content = read_plugin_file(path)
-    return PluginDevInternalFileResponse(file_path=path, content=content, sha256=sha256_text(content))
+    normalized_path = normalize_plugin_file_path(path)
+    content = read_plugin_file(normalized_path)
+    return PluginDevInternalFileResponse(file_path=normalized_path, content=content, sha256=sha256_text(content))
 
 
 @internal_router.post(
@@ -191,17 +202,19 @@ async def get_internal_plugin_file(
 async def create_internal_plugin_proposal(
     body: PluginDevInternalProposalRequest,
 ) -> PluginDevProposalResponse:
-    resolve_plugin_file(body.file_path)
     if len(body.content.encode("utf-8")) > _MAX_INTERNAL_PROPOSAL_BYTES:
         raise ValidationError(reason="写入提案内容过大")
     task = get_task(body.task_id)
     if task.status in _TERMINAL_TASK_STATUSES:
         raise ValidationError(reason=f"任务 {body.task_id} 已结束（{task.status}），不能再创建写入提案")
-    if body.file_path != task.file_path:
-        raise ValidationError(reason=f"提案目标 {body.file_path} 与任务目标 {task.file_path} 不一致")
-    extra_contents, deleted_files = _validate_internal_file_set(body.file_path, body.files, body.deleted_files)
+    normalized_path, extra_contents, deleted_files = _validate_internal_file_set(
+        body.file_path, body.files, body.deleted_files
+    )
+    normalized_task_path = normalize_plugin_file_path(task.file_path)
+    if normalized_path != normalized_task_path:
+        raise ValidationError(reason=f"提案目标 {normalized_path} 与任务目标 {normalized_task_path} 不一致")
     try:
-        before = read_plugin_file(body.file_path)
+        before = read_plugin_file(normalized_path)
     except NotFoundError:
         before = ""
     extra_files: dict[str, tuple[str, str]] = {}
@@ -213,7 +226,7 @@ async def create_internal_plugin_proposal(
         extra_files[extra_path] = (extra_before, extra_content)
     return create_proposal(
         task_id=body.task_id,
-        file_path=body.file_path,
+        file_path=normalized_path,
         before=before,
         after=body.content,
         summary=body.summary.strip() or "由插件开发沙盒创建写入提案",
@@ -231,16 +244,17 @@ async def create_internal_plugin_proposal(
 async def check_internal_plugin_candidate(
     body: PluginDevInternalCheckRequest,
 ) -> PluginCheckReport:
-    resolve_plugin_file(body.file_path)
     if len(body.content.encode("utf-8")) > _MAX_INTERNAL_PROPOSAL_BYTES:
         raise ValidationError(reason="自检候选内容过大")
-    extra_contents, deleted_files = _validate_internal_file_set(body.file_path, body.files, body.deleted_files)
+    normalized_path, extra_contents, deleted_files = _validate_internal_file_set(
+        body.file_path, body.files, body.deleted_files
+    )
     # 安全约束：内部网关自检固定为 static 级别，绝不执行沙盒提交的候选代码；
     # 执行型检查（smoke）只在用户确认应用提案时进行。
     check_kwargs: dict[str, object] = {"extra_files": extra_contents or None, "level": "static"}
     if deleted_files:
         check_kwargs["deleted_files"] = deleted_files
-    report = await run_plugin_self_check(body.file_path, body.content, **check_kwargs)
+    report = await run_plugin_self_check(normalized_path, body.content, **check_kwargs)
     if body.level != "static":
         report.warnings.append(f"内部网关自检固定为 static 级别，已忽略请求的 {body.level} 级别；执行型检查将在用户应用提案时进行")
     return report
@@ -401,7 +415,7 @@ async def discard_plugin_dev_proposal(
     proposal_id: str,
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevApplyResponse:
-    discard_proposal(proposal_id)
+    await discard_proposal(proposal_id)
     return PluginDevApplyResponse(version_id="")
 
 
@@ -423,5 +437,5 @@ async def rollback_plugin_dev_file(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevRollbackResponse:
     resolve_plugin_file(file_path)
-    version_id = rollback(file_path, body.version_id, body.target)
+    version_id = await rollback_plugin_file(file_path, body.version_id, body.target)
     return PluginDevRollbackResponse(version_id=version_id)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from nekro_agent.core.os_env import WORKDIR_PLUGIN_DIR
 from nekro_agent.schemas.errors import NotFoundError, ValidationError
@@ -23,6 +23,25 @@ def safe_file_slug(file_path: str) -> str:
 
 def sha256_text(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def normalize_plugin_file_path(file_path: str) -> str:
+    """将外部输入规范化为唯一的 POSIX 插件相对路径。
+
+    内部网关协议只接受规范 POSIX 路径，显式拒绝空段、`.`、`..` 与反斜杠，
+    避免同一文件通过路径别名绕过去重、插件根目录或写删冲突校验。
+    """
+    if not file_path or file_path.strip() != file_path or "\\" in file_path:
+        raise ValidationError(reason="插件文件路径必须是规范的 POSIX 相对路径")
+    parts = file_path.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ValidationError(reason="插件文件路径不能包含空目录、. 或 ..")
+    path = PurePosixPath(file_path)
+    if path.is_absolute():
+        raise ValidationError(reason="插件文件路径不能是绝对路径")
+    normalized = path.as_posix()
+    resolve_plugin_file(normalized)
+    return normalized
 
 
 def plugin_top_dir(file_path: str) -> str | None:
@@ -60,7 +79,7 @@ def list_plugin_files() -> list[str]:
     for pattern in ("**/*.py", "**/*.py.disabled"):
         for item in root.glob(pattern):
             if item.is_file():
-                files.append(str(item.relative_to(root)))
+                files.append(item.relative_to(root).as_posix())
     return sorted(files)
 
 

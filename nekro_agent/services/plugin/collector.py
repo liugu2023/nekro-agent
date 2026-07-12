@@ -204,8 +204,12 @@ class PluginCollector:
         if orig_mod is None:
             logger.warning(f"未找到原始模块 {module_ref}，无法卸载旧模块")
             return
-        self.loaded_module_names.discard(orig_mod)
-        stale_modules = [m for m in sys.modules if m == orig_mod or m.startswith(f"{orig_mod}.")]
+        self._purge_module_tree(orig_mod)
+
+    def _purge_module_tree(self, module_path: str) -> None:
+        """无条件清理指定模块及子模块，供失败加载前后使用。"""
+        self.loaded_module_names.discard(module_path)
+        stale_modules = [m for m in sys.modules if m == module_path or m.startswith(f"{module_path}.")]
         for stale_module in stale_modules:
             sys.modules.pop(stale_module, None)
         if stale_modules:
@@ -311,12 +315,10 @@ class PluginCollector:
         real_path, source_is_builtin, source_is_package = existing_sources[0]
 
         loaded_plugin = self.get_plugin_by_module_name(fixed_module_name)
-        resolved_is_builtin = (
-            is_builtin if is_builtin is not None else loaded_plugin.is_builtin if loaded_plugin else source_is_builtin
-        )
-        resolved_is_package = (
-            is_package if is_package is not None else loaded_plugin.is_package if loaded_plugin else source_is_package
-        )
+        if (is_builtin is not None and is_builtin != source_is_builtin) or (
+            is_package is not None and is_package != source_is_package
+        ):
+            logger.warning(f"插件 `{fixed_module_name}` 的显式类型与实际加载来源不一致，将以实际来源为准")
         if loaded_plugin:
             logger.info(f"插件 `{fixed_module_name}` 已加载，正在重载...")
             # 卸载插件命令
@@ -332,11 +334,18 @@ class PluginCollector:
             # 卸载旧插件模块（含包内子模块），保证后续重新 import 执行最新代码
             self._pop_stale_plugin_modules(fixed_module_name)
 
+        module_path = (
+            f"{real_path.parent.parent.name}.{real_path.parent.name}"
+            if real_path.name == "__init__.py"
+            else f"{real_path.parent.name}.{real_path.stem}"
+        )
+        self._purge_module_tree(module_path)
+
         # logger.debug(f"尝试加载插件: {real_path} 从 {fixed_module_name}")
         await self._try_load_plugin(
             real_path,
-            is_builtin=resolved_is_builtin,
-            is_package=resolved_is_package,
+            is_builtin=source_is_builtin,
+            is_package=source_is_package,
         )
 
         # 重载完成后，如果插件有路由，进行热重载
@@ -493,6 +502,7 @@ class PluginCollector:
         try:
             module = import_module(module_path)
         except Exception as e:
+            self._purge_module_tree(module_path)
             error_msg = f"加载插件失败 {path}: {e}"
             logger.exception(error_msg)
 
@@ -512,6 +522,7 @@ class PluginCollector:
             return
 
         if not hasattr(module, "plugin"):
+            self._purge_module_tree(module_path)
             error_msg = f"插件 `{module_path}` 中缺少 `plugin` 实例"
             logger.error(error_msg)
 
@@ -548,6 +559,7 @@ class PluginCollector:
                 if plugin.init_method:
                     await plugin.init_method()
             except Exception as e:
+                self._purge_module_tree(module_path)
                 error_msg = f'插件 "{plugin.name}" 初始化失败 {path}: {e}'
                 logger.exception(error_msg)
 
@@ -592,6 +604,7 @@ class PluginCollector:
             # 如果之前记录了失败信息，现在加载成功了，删除失败记录
             self._remove_failed_plugin(module_path)
         else:
+            self._purge_module_tree(module_path)
             error_msg = f"插件实例类型错误: {path}"
             logger.error(error_msg)
 

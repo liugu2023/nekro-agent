@@ -43,7 +43,7 @@ import {
   Menu as MenuIcon,
 } from '@mui/icons-material'
 import PluginFileSelect from './plugin-file-select'
-import { findPluginByFile, topModuleNameOf } from './plugin-file-utils'
+import { findPluginByFile, isDisabledPluginEntry, topModuleNameOf } from './plugin-file-utils'
 import { EditorTabs } from '../../components/common/NekroTabs'
 import { Editor } from '@monaco-editor/react'
 import { pluginEditorApi, streamGenerateCode } from '../../services/api/plugin-editor'
@@ -177,6 +177,11 @@ export default function PluginsEditorPage() {
   // 使用新的通知系统
   const notification = useNotification()
   const { t } = useTranslation('plugins')
+  const selectedPluginEnabled = pluginInfo
+    ? pluginInfo.enabled
+    : isDisabledPluginEntry(selectedFile)
+      ? false
+      : null
 
   // 页面初始化时加载文件列表
   useEffect(() => {
@@ -476,16 +481,24 @@ export default function PluginsEditorPage() {
       setIsLoading(true)
       isLoadingContentRef.current = true
 
+      const latestPluginFiles = await pluginEditorApi.getPluginFiles()
+      const pluginAlreadyExists = latestPluginFiles.some(filePath =>
+        filePath === fileName ||
+        filePath === `${fileName}.disabled` ||
+        filePath.startsWith(`${name}/`)
+      )
+      if (pluginAlreadyExists) {
+        notification.error(t('editor.validation.pluginAlreadyExists'))
+        return
+      }
+
       // 获取模板内容
       const template = await pluginEditorApi.generatePluginTemplate(name, description)
       // 保存文件
       await pluginEditorApi.savePluginFile(fileName, template || '')
 
-      // 重新加载文件列表
-      const files = await pluginEditorApi.getPluginFiles()
-      setFiles(files)
-
       // 更新编辑器内容
+      setFiles(current => [...new Set([...current, fileName])].sort())
       setSelectedFile(fileName)
       prevSelectedFileRef.current = fileName
       setCode(template || '')
@@ -493,6 +506,12 @@ export default function PluginsEditorPage() {
       setHasUnsavedChanges(false)
       setIsNewPluginDialogOpen(false)
       notification.success(t('editor.messages.createSuccess'))
+      try {
+        setFiles(await pluginEditorApi.getPluginFiles())
+      } catch (refreshError) {
+        const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+        notification.warning(`${t('editor.messages.createRefreshFailed')}: ${message}`)
+      }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : t('editor.messages.unknownError')
       notification.error(t('editor.messages.createFailed') + ': ' + errorMessage)
@@ -626,15 +645,28 @@ export default function PluginsEditorPage() {
   }, [selectedFile, pluginInfoTick])
 
   const handleTogglePlugin = async () => {
-    if (!pluginInfo) return
-    const nextEnabled = !pluginInfo.enabled
+    if (selectedPluginEnabled === null) return
+    const nextEnabled = !selectedPluginEnabled
     const action = nextEnabled ? t('editor.messages.enabled') : t('editor.messages.disabled')
 
     try {
       setIsLoading(true)
-      const ok = await togglePluginEnabled(pluginInfo.id, nextEnabled)
-      if (!ok) {
-        throw new Error(t('editor.messages.unknownError'))
+      if (pluginInfo) {
+        const ok = await togglePluginEnabled(pluginInfo.id, nextEnabled)
+        if (!ok) {
+          throw new Error(t('editor.messages.unknownError'))
+        }
+      } else {
+        const result = await pluginEditorApi.togglePluginFile(selectedFile)
+        setFiles(current => current.map(filePath => filePath === selectedFile ? result.file_path : filePath).sort())
+        setSelectedFile(result.file_path)
+        prevSelectedFileRef.current = result.file_path
+        try {
+          setFiles(await pluginEditorApi.getPluginFiles())
+        } catch (refreshError) {
+          const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+          notification.warning(`${t('editor.messages.loadFileListFailed')}: ${message}`)
+        }
       }
       setPluginInfoTick(tick => tick + 1)
       notification.success(t('editor.messages.toggleSuccess', { action }))
@@ -755,8 +787,8 @@ export default function PluginsEditorPage() {
       <ActionButton
         startIcon={<PowerIcon />}
         onClick={() => setIsDisableDialogOpen(true)}
-        disabled={!pluginInfo}
-        color={pluginInfo?.enabled === false ? 'success' : 'warning'}
+        disabled={selectedPluginEnabled === null}
+        color={selectedPluginEnabled === false ? 'success' : 'warning'}
         sx={{
           flex: isMobile ? '1 1 calc(50% - 4px)' : 'auto',
           mb: isMobile ? 1 : 0,
@@ -764,10 +796,10 @@ export default function PluginsEditorPage() {
         size={isSmall ? 'small' : 'medium'}
       >
         {isSmall
-          ? pluginInfo?.enabled === false
+          ? selectedPluginEnabled === false
             ? t('editor.messages.enabled')
             : t('editor.messages.disabled')
-          : pluginInfo?.enabled === false
+          : selectedPluginEnabled === false
             ? t('editor.enablePlugin')
             : t('editor.disablePlugin')}
       </ActionButton>
@@ -995,13 +1027,13 @@ export default function PluginsEditorPage() {
                 setIsDisableDialogOpen(true)
                 setDrawerOpen(false)
               }}
-              disabled={!pluginInfo}
-              color={pluginInfo?.enabled === false ? 'success' : 'warning'}
+              disabled={selectedPluginEnabled === null}
+              color={selectedPluginEnabled === false ? 'success' : 'warning'}
               size={isSmall ? 'small' : 'medium'}
               fullWidth
               sx={{
                 fontWeight: 'medium',
-                ...(pluginInfo?.enabled === false && {
+                ...(selectedPluginEnabled === false && {
                   borderColor: theme => alpha(theme.palette.success.main, 0.5),
                   color: 'success.main',
                   '&:hover': {
@@ -1009,7 +1041,7 @@ export default function PluginsEditorPage() {
                     backgroundColor: theme => alpha(theme.palette.success.main, 0.1),
                   },
                 }),
-                ...(pluginInfo?.enabled && {
+                ...(selectedPluginEnabled === true && {
                   borderColor: theme => alpha(theme.palette.warning.main, 0.5),
                   color: 'warning.main',
                   '&:hover': {
@@ -1019,7 +1051,7 @@ export default function PluginsEditorPage() {
                 }),
               }}
             >
-              {pluginInfo?.enabled === false
+              {selectedPluginEnabled === false
                 ? t('editor.enablePlugin')
                 : t('editor.disablePlugin')}
             </ActionButton>
@@ -2122,14 +2154,14 @@ export default function PluginsEditorPage() {
       {/* 启用/禁用插件对话框 */}
       <Dialog open={isDisableDialogOpen} onClose={() => setIsDisableDialogOpen(false)}>
         <DialogTitle>
-          {pluginInfo?.enabled === false
+          {selectedPluginEnabled === false
             ? t('editor.dialogs.toggleTitle', { action: t('editor.messages.enabled') })
             : t('editor.dialogs.toggleTitle', { action: t('editor.messages.disabled') })}
         </DialogTitle>
         <DialogContent>
           <DialogContentText>
             {t('editor.dialogs.toggleMessage', {
-              action: pluginInfo?.enabled === false
+              action: selectedPluginEnabled === false
                 ? t('editor.messages.enabled')
                 : t('editor.messages.disabled'),
             })}
@@ -2139,10 +2171,10 @@ export default function PluginsEditorPage() {
           <ActionButton onClick={() => setIsDisableDialogOpen(false)}>{t('editor.cancel')}</ActionButton>
           <ActionButton
             onClick={handleTogglePlugin}
-            color={pluginInfo?.enabled === false ? 'success' : 'warning'}
+            color={selectedPluginEnabled === false ? 'success' : 'warning'}
             variant="contained"
           >
-            {pluginInfo?.enabled === false
+            {selectedPluginEnabled === false
               ? t('editor.messages.enabled')
               : t('editor.messages.disabled')}
           </ActionButton>

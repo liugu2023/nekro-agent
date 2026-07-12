@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -121,6 +122,37 @@ async def test_reload_preserves_loaded_plugin_type(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reload_uses_actual_source_type_when_duplicate_source_exists(tmp_path: Path, monkeypatch):
+    collector = _make_collector_with_dirs(tmp_path)
+    local_file = collector.workdir_plugin_dir / "duplicate.py"
+    package_file = collector.packages_dir / "duplicate.py"
+    local_file.write_text("plugin = None\n", encoding="utf-8")
+    package_file.write_text("plugin = None\n", encoding="utf-8")
+    loaded_plugin = SimpleNamespace(
+        module_name="duplicate",
+        is_builtin=False,
+        is_package=True,
+        _module=SimpleNamespace(__name__="packages.duplicate"),
+        _commands=[],
+        cleanup_method=None,
+        key="author.duplicate",
+    )
+    collector.loaded_plugins = {loaded_plugin.key: loaded_plugin}
+    collector.loaded_module_names = {"packages.duplicate"}
+    loaded_types: list[tuple[Path, bool, bool]] = []
+
+    async def fake_try_load(item_path: Path, is_builtin: bool = False, is_package: bool = False) -> bool:
+        loaded_types.append((item_path, is_builtin, is_package))
+        return True
+
+    monkeypatch.setattr(collector, "_try_load_plugin", fake_try_load)
+
+    await collector.reload_plugin_by_module_name("duplicate")
+
+    assert loaded_types == [(local_file, False, False)]
+
+
+@pytest.mark.asyncio
 async def test_reload_infers_plugin_type_from_source_directory(tmp_path: Path, monkeypatch):
     collector = _make_collector_with_dirs(tmp_path)
     builtin_file = collector.builtin_plugin_dir / "builtin_demo.py"
@@ -180,8 +212,115 @@ async def test_delete_package_file_reload_rules(
 
     assert response.ok is True
     assert not target_file.exists()
-    assert unloaded == [file_path]
+    assert unloaded == ["mypkg"]
     assert reloaded == expected_reload
+
+
+def test_plugin_editor_rejects_traversal_and_invalid_suffix(tmp_path: Path, monkeypatch):
+    from nekro_agent.routers import plugin_editor
+    from nekro_agent.schemas.errors import ValidationError
+
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir()
+    outside_file = tmp_path / "outside.py"
+    outside_file.write_text("SECRET = True\n", encoding="utf-8")
+    monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(plugin_dir))
+
+    for file_path in ("../outside.py", "notes.txt"):
+        with pytest.raises(ValidationError):
+            plugin_editor._resolve_plugin_file(file_path)
+
+
+
+def test_plugin_editor_rejects_symlink_escape(tmp_path: Path, monkeypatch):
+    from nekro_agent.routers import plugin_editor
+    from nekro_agent.schemas.errors import ValidationError
+
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir()
+    outside_file = tmp_path / "outside.py"
+    outside_file.write_text("SECRET = True\n", encoding="utf-8")
+    monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(plugin_dir))
+
+    symlink = plugin_dir / "escape.py"
+    try:
+        symlink.symlink_to(outside_file)
+    except OSError:
+        pytest.skip("当前环境不支持创建符号链接")
+    with pytest.raises(ValidationError):
+        plugin_editor._resolve_plugin_file("escape.py", must_exist=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("file_path", "expected_path", "expected_unload", "expected_reload"),
+    [
+        ("solo.py", "solo.py.disabled", ["solo.py"], []),
+        ("solo.py.disabled", "solo.py", [], ["solo.py"]),
+        ("pkg/__init__.py", "pkg/__init__.py.disabled", ["pkg"], []),
+        ("pkg/__init__.py.disabled", "pkg/__init__.py", [], ["pkg"]),
+    ],
+)
+async def test_toggle_plugin_entry_file(
+    tmp_path: Path,
+    monkeypatch,
+    file_path: str,
+    expected_path: str,
+    expected_unload: list[str],
+    expected_reload: list[str],
+):
+    from nekro_agent.routers import plugin_editor
+
+    target_file = tmp_path / file_path
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("plugin = None\n", encoding="utf-8")
+    unloaded: list[str] = []
+    reloaded: list[str] = []
+
+    async def fake_unload(module_name: str) -> None:
+        unloaded.append(module_name)
+
+    async def fake_reload(module_name: str) -> None:
+        reloaded.append(module_name)
+
+    monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.setattr(plugin_editor.plugin_collector, "get_plugin_by_module_name", lambda _: SimpleNamespace())
+    monkeypatch.setattr(plugin_editor.plugin_collector, "unload_plugin_by_module_name", fake_unload)
+    monkeypatch.setattr(plugin_editor.plugin_collector, "reload_plugin_by_module_name", fake_reload)
+
+    response = await plugin_editor.toggle_plugin_file.__wrapped__(file_path, _current_user=SimpleNamespace())
+
+    assert response.model_dump() == {"ok": True, "file_path": expected_path}
+    assert (tmp_path / expected_path).is_file()
+    assert unloaded == expected_unload
+    assert reloaded == expected_reload
+
+
+@pytest.mark.asyncio
+async def test_delete_restores_loaded_plugin_when_unlink_fails(tmp_path: Path, monkeypatch):
+    from nekro_agent.routers import plugin_editor
+
+    target_file = tmp_path / "demo.py"
+    target_file.write_text("plugin = None\n", encoding="utf-8")
+    original_unlink = Path.unlink
+    reload_mock = AsyncMock()
+
+    def fail_target_unlink(path: Path, *args, **kwargs):
+        if path == target_file:
+            raise PermissionError("read-only")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.setattr(plugin_editor.plugin_collector, "get_plugin_by_module_name", lambda _: SimpleNamespace())
+    monkeypatch.setattr(plugin_editor.plugin_collector, "unload_plugin_by_module_name", AsyncMock())
+    monkeypatch.setattr(plugin_editor.plugin_collector, "reload_plugin_by_module_name", reload_mock)
+    monkeypatch.setattr(Path, "unlink", fail_target_unlink)
+
+    with pytest.raises(PermissionError, match="read-only"):
+        await plugin_editor.delete_plugin_file.__wrapped__("demo.py", _current_user=SimpleNamespace())
+
+    reload_mock.assert_awaited_once_with("demo.py")
+    assert target_file.exists()
 
 
 def test_get_plugin_by_module_name_falls_back_to_normalized_name(tmp_path: Path):
@@ -214,3 +353,25 @@ def test_pop_stale_plugin_modules_removes_submodules(tmp_path: Path, monkeypatch
     # 前缀相似但不同的模块不受影响
     assert "workdir.mypkg_other" in sys.modules
     assert "workdir.mypkg" not in collector.loaded_module_names
+
+
+@pytest.mark.asyncio
+async def test_failed_package_import_purges_partial_modules(tmp_path: Path, monkeypatch):
+    from nekro_agent.services.plugin import collector as collector_module
+
+    collector = _make_collector_with_dirs(tmp_path)
+    package_dir = collector.workdir_plugin_dir / "broken"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("raise RuntimeError\n", encoding="utf-8")
+
+    def fake_import(module_path: str):
+        monkeypatch.setitem(sys.modules, module_path, SimpleNamespace())
+        monkeypatch.setitem(sys.modules, f"{module_path}.helper", SimpleNamespace())
+        raise RuntimeError("broken import")
+
+    monkeypatch.setattr(collector_module, "import_module", fake_import)
+
+    await collector._try_load_plugin(package_dir)
+
+    assert "workdir.broken" not in sys.modules
+    assert "workdir.broken.helper" not in sys.modules

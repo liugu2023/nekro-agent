@@ -5,6 +5,13 @@ export function topModuleNameOf(filePath: string): string {
   return filePath.split('/')[0].replace(/\.py(\.disabled)?$/, '')
 }
 
+/** 是否为可通过文件重命名重新启用的插件入口。 */
+export function isDisabledPluginEntry(filePath: string): boolean {
+  if (!filePath.endsWith('.py.disabled')) return false
+  const parts = filePath.split('/')
+  return parts.length === 1 || parts.at(-1) === '__init__.py.disabled'
+}
+
 /**
  * 在已加载插件列表中查找文件对应的插件。
  *

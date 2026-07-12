@@ -1,5 +1,5 @@
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import AsyncGenerator, Optional
 
 from fastapi import APIRouter, Depends, Request
@@ -34,6 +34,34 @@ class ActionResponse(BaseModel):
     ok: bool = True
 
 
+class ToggleFileResponse(ActionResponse):
+    file_path: str
+
+
+def _resolve_plugin_file(file_path: str, *, must_exist: bool = False) -> tuple[Path, Path]:
+    """解析并校验插件文件路径，阻止路径穿越与符号链接越界。"""
+    if not WORKDIR_PLUGIN_DIR:
+        raise ValidationError(reason="工作目录插件目录未配置")
+
+    normalized_path = file_path.replace("\\", "/")
+    relative_path = PurePosixPath(normalized_path)
+    if relative_path.is_absolute() or not relative_path.parts or any(part in {"", ".", ".."} for part in relative_path.parts):
+        raise ValidationError(reason="文件路径非法")
+    if not normalized_path.endswith((".py", ".py.disabled")):
+        raise ValidationError(reason="仅允许操作 Python 插件文件")
+
+    plugin_dir = Path(WORKDIR_PLUGIN_DIR).resolve()
+    full_path = (plugin_dir / Path(*relative_path.parts)).resolve(strict=False)
+    try:
+        full_path.relative_to(plugin_dir)
+    except ValueError as e:
+        raise ValidationError(reason="文件路径非法") from e
+
+    if must_exist and not full_path.is_file():
+        raise NotFoundError(resource=f"文件 {file_path}")
+    return plugin_dir, full_path
+
+
 @router.get("/files", summary="获取插件文件列表", response_model=list[str])
 @require_role(Role.Admin)
 async def get_plugin_files(
@@ -43,7 +71,7 @@ async def get_plugin_files(
     if not WORKDIR_PLUGIN_DIR:
         raise ValidationError(reason="工作目录插件目录未配置")
 
-    plugin_dir = Path(WORKDIR_PLUGIN_DIR)
+    plugin_dir = Path(WORKDIR_PLUGIN_DIR).resolve()
     if not plugin_dir.exists():
         plugin_dir.mkdir(parents=True, exist_ok=True)
         return []
@@ -51,7 +79,11 @@ async def get_plugin_files(
     files: list[str] = []
     for pattern in ["**/*.py", "**/*.py.disabled"]:
         for file in plugin_dir.glob(pattern):
-            files.append(str(file.relative_to(plugin_dir)))
+            try:
+                file.resolve().relative_to(plugin_dir)
+            except ValueError:
+                continue
+            files.append(file.relative_to(plugin_dir).as_posix())
 
     return files
 
@@ -63,19 +95,7 @@ async def get_plugin_file_content(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> FileContentResponse:
     """获取插件文件内容"""
-    if not WORKDIR_PLUGIN_DIR:
-        raise ValidationError(reason="工作目录插件目录未配置")
-
-    plugin_dir = Path(WORKDIR_PLUGIN_DIR)
-    full_path = plugin_dir / file_path
-
-    if not full_path.exists():
-        raise NotFoundError(resource=f"文件 {file_path}")
-
-    try:
-        full_path.relative_to(plugin_dir)
-    except ValueError as e:
-        raise ValidationError(reason="文件路径非法") from e
+    _, full_path = _resolve_plugin_file(file_path, must_exist=True)
 
     content = full_path.read_text(encoding="utf-8")
     return FileContentResponse(content=content)
@@ -89,16 +109,7 @@ async def save_plugin_file(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> ActionResponse:
     """保存插件文件"""
-    if not WORKDIR_PLUGIN_DIR:
-        raise ValidationError(reason="工作目录插件目录未配置")
-
-    plugin_dir = Path(WORKDIR_PLUGIN_DIR)
-    full_path = plugin_dir / file_path
-
-    try:
-        full_path.relative_to(plugin_dir)
-    except ValueError as e:
-        raise ValidationError(reason="文件路径非法") from e
+    _, full_path = _resolve_plugin_file(file_path)
 
     full_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -116,27 +127,22 @@ async def delete_plugin_file(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> ActionResponse:
     """删除插件文件"""
-    if not WORKDIR_PLUGIN_DIR:
-        raise ValidationError(reason="工作目录插件目录未配置")
-
-    plugin_dir = Path(WORKDIR_PLUGIN_DIR)
-    full_path = plugin_dir / file_path
-
-    try:
-        full_path.relative_to(plugin_dir)
-    except ValueError as e:
-        raise ValidationError(reason="文件路径非法") from e
-
-    if not full_path.exists():
-        raise NotFoundError(resource=f"文件 {file_path}")
+    plugin_dir, full_path = _resolve_plugin_file(file_path, must_exist=True)
+    relative_path = full_path.relative_to(plugin_dir)
+    module_name = relative_path.parts[0]
+    was_loaded = plugin_collector.get_plugin_by_module_name(module_name) is not None
 
     # 按顶层模块名卸载（包内文件删除时卸载其所属的顶层包插件），
     # 避免已注册的命令、路由继续引用即将删除的旧模块。
-    await plugin_collector.unload_plugin_by_module_name(file_path)
+    await plugin_collector.unload_plugin_by_module_name(module_name)
 
-    full_path.unlink()
+    try:
+        full_path.unlink()
+    except OSError:
+        if was_loaded:
+            await plugin_collector.reload_plugin_by_module_name(module_name)
+        raise
 
-    relative_path = full_path.relative_to(plugin_dir)
     top_level_package_entry = plugin_dir / relative_path.parts[0] / "__init__.py"
     if len(relative_path.parts) > 1 and top_level_package_entry.exists():
         # 删除普通包内文件后恢复顶层包运行。若删除的是被入口依赖的模块，
@@ -144,6 +150,44 @@ async def delete_plugin_file(
         await plugin_collector.reload_plugin_by_module_name(relative_path.parts[0])
 
     return ActionResponse(ok=True)
+
+
+@router.post("/toggle/{file_path:path}", summary="启用或禁用插件文件", response_model=ToggleFileResponse)
+@require_role(Role.Admin)
+async def toggle_plugin_file(
+    file_path: str = PathParam(...),
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> ToggleFileResponse:
+    """通过重命名插件入口文件启用或禁用插件。"""
+    plugin_dir, full_path = _resolve_plugin_file(file_path, must_exist=True)
+    relative_path = full_path.relative_to(plugin_dir)
+    if len(relative_path.parts) > 1 and relative_path.name not in {"__init__.py", "__init__.py.disabled"}:
+        raise ValidationError(reason="仅允许启用或禁用插件入口文件")
+    is_disabled = full_path.name.endswith(".py.disabled")
+    enabled_path = full_path.with_name(full_path.name.removesuffix(".disabled"))
+    disabled_path = full_path.with_name(f"{full_path.name}.disabled")
+    target_path = enabled_path if is_disabled else disabled_path
+
+    if target_path.exists():
+        raise ValidationError(reason=f"目标文件 {target_path.relative_to(plugin_dir).as_posix()} 已存在")
+
+    module_name = relative_path.parts[0]
+    if not is_disabled:
+        was_loaded = plugin_collector.get_plugin_by_module_name(module_name) is not None
+        await plugin_collector.unload_plugin_by_module_name(module_name)
+        try:
+            full_path.rename(target_path)
+        except OSError:
+            if was_loaded:
+                await plugin_collector.reload_plugin_by_module_name(module_name)
+            raise
+    else:
+        full_path.rename(target_path)
+        target_relative_path = target_path.relative_to(plugin_dir)
+        reload_ref = target_relative_path.parts[0] if len(target_relative_path.parts) > 1 else target_relative_path.as_posix()
+        await plugin_collector.reload_plugin_by_module_name(reload_ref)
+
+    return ToggleFileResponse(ok=True, file_path=target_path.relative_to(plugin_dir).as_posix())
 
 
 class GenerateCodeRequest(BaseModel):

@@ -89,6 +89,7 @@ _PLUGIN_DEV_CLAUDE_MD = """# NekroAgent 插件开发专用沙盒
 - 包形式插件的入口 `__init__.py` 必须存在模块级 `plugin` 实例（可以 `from .plugin import plugin`）。
 - 自检命令执行的是静态检查（语法、导入可用性、插件结构），不会运行插件代码；完整加载检查在用户确认应用提案时由后端执行。
 - 只有 CC 沙盒自检通过后，才能调用内部网关创建 proposal；不要在自检前创建 proposal。如果无法调用网关，也必须确保工作副本里已经是最终候选代码。
+- 包任务调用内部 `/check` 或 `/proposals` 时，`files` 只包含当前仍存在的完整 `.py` 文件；删除的包内文件必须放入 `deleted_files` 字符串数组，不能只从 `files` 中省略。
 - 如需读取真实插件文件或提交写入提案，使用 `NEKRO_PLUGIN_DEV_INTERNAL_API_BASE`，请求头带 `X-Internal-API-Token: $INTERNAL_API_TOKEN`。
 - 内部网关提供版本、文件列表、文件读取、静态自检和 proposal 创建能力，真实写入仍由 NekroAgent 后端和用户确认完成。
 
