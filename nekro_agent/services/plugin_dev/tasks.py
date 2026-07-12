@@ -31,7 +31,12 @@ from nekro_agent.services.plugin_dev.self_check import (
     run_plugin_self_check,
     summarize_plugin_check,
 )
-from nekro_agent.services.plugin_dev.versioning import get_version_info, record_version, utc_now_iso
+from nekro_agent.services.plugin_dev.versioning import (
+    get_version_info,
+    record_version,
+    remove_version_record,
+    utc_now_iso,
+)
 
 logger = get_sub_logger("plugin_dev_tasks")
 
@@ -438,13 +443,14 @@ def _collect_candidate_files(
     current_tree: dict[str, str],
     initial_tree: dict[str, str],
     primary_file_path: str,
-) -> tuple[dict[str, str], list[str], bool]:
+) -> tuple[dict[str, str], set[str], list[str], bool]:
     """从工作副本树提取候选文件集。
 
-    返回 (候选完整文件集, 越界被忽略的文件, 相对初始状态是否有变化)。
+    返回 (候选现存文件集, 候选删除文件, 越界被忽略的文件, 相对初始状态是否有变化)。
     """
     candidate_files: dict[str, str] = {}
     ignored: list[str] = []
+    deleted_files: set[str] = set()
     changed = False
     for rel_path, content in current_tree.items():
         if not _is_candidate_path_allowed(rel_path, primary_file_path):
@@ -454,18 +460,30 @@ def _collect_candidate_files(
         candidate_files[rel_path] = content
         if initial_tree.get(rel_path) != content:
             changed = True
-    return candidate_files, ignored, changed
+    for rel_path in initial_tree.keys() - current_tree.keys():
+        if _is_candidate_path_allowed(rel_path, primary_file_path):
+            deleted_files.add(rel_path)
+            changed = True
+        else:
+            ignored.append(rel_path)
+    return candidate_files, deleted_files, ignored, changed
 
 
-def _candidate_signature(files: dict[str, str]) -> str:
-    payload = json.dumps(sorted((path, sha256_text(content)) for path, content in files.items()))
+def _candidate_signature(files: dict[str, str], deleted_files: set[str] | None = None) -> str:
+    payload = json.dumps(
+        [*sorted((path, sha256_text(content)) for path, content in files.items()), *sorted((path, "<deleted>") for path in deleted_files or set())]
+    )
     return sha256_text(payload)
 
 
 def _proposal_files_map(proposal: PluginDevProposalResponse) -> dict[str, str]:
     if proposal.files:
-        return {item.file_path: item.content for item in proposal.files}
+        return {item.file_path: item.content for item in proposal.files if item.action == "write"}
     return {proposal.file_path: proposal.result_code}
+
+
+def _proposal_deleted_files(proposal: PluginDevProposalResponse) -> set[str]:
+    return {item.file_path for item in proposal.files if item.action == "delete"}
 
 
 def _primary_content_from_files(files: dict[str, str], primary_file_path: str, fallback: str) -> str:
@@ -603,6 +621,7 @@ def create_proposal(
     after: str,
     summary: str,
     extra_files: dict[str, tuple[str, str]] | None = None,
+    deleted_files: set[str] | None = None,
 ) -> PluginDevProposalResponse:
     """创建写入提案。extra_files 为主文件之外的文件集：{file_path: (before, after)}。"""
     proposal_id = f"proposal-{uuid.uuid4().hex}"
@@ -611,12 +630,26 @@ def create_proposal(
         if extra_path == file_path:
             continue
         entries.append((extra_path, extra_before, extra_after))
+    deleted_entries: list[tuple[str, str, str]] = []
+    for deleted_path in sorted(deleted_files or set()):
+        if deleted_path == file_path or any(path == deleted_path for path, _, _ in entries):
+            continue
+        deleted_entries.append((deleted_path, read_plugin_file(deleted_path), ""))
 
-    diff_text = "".join(_diff(path, entry_before, entry_after) for path, entry_before, entry_after in entries)
+    diff_text = "".join(_diff(path, entry_before, entry_after) for path, entry_before, entry_after in [*entries, *deleted_entries])
     files = [
         PluginDevProposalFile(file_path=path, content=entry_after, before_sha256=sha256_text(entry_before))
         for path, entry_before, entry_after in entries
     ]
+    files.extend(
+        PluginDevProposalFile(
+            file_path=path,
+            content="",
+            before_sha256=sha256_text(entry_before),
+            action="delete",
+        )
+        for path, entry_before, _ in deleted_entries
+    )
     proposal = PluginDevProposalResponse(
         proposal_id=proposal_id,
         task_id=task_id,
@@ -693,7 +726,8 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
         last_failure = ""
         last_checked_code = current_code
         candidate_files: dict[str, str] = {}
-        initial_candidate_files, _, _ = _collect_candidate_files(initial_tree, {}, body.file_path)
+        candidate_deleted_files: set[str] = set()
+        initial_candidate_files, _, _, _ = _collect_candidate_files(initial_tree, {}, body.file_path)
         rejected_signatures: set[str] = {_candidate_signature(initial_candidate_files)}
         tool_names_by_id: dict[str, str] = {}
 
@@ -742,10 +776,12 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
 
             candidate_source = ""
             candidate_files = {}
+            candidate_deleted_files = set()
             proposal = get_latest_pending_proposal_for_task(task_id)
             if proposal is not None:
                 proposal_files = _proposal_files_map(proposal)
-                if _candidate_signature(proposal_files) in rejected_signatures:
+                proposal_deleted_files = _proposal_deleted_files(proposal)
+                if _candidate_signature(proposal_files, proposal_deleted_files) in rejected_signatures:
                     last_failure = "内部网关提案内容与已拒绝的候选代码一致，未产生新的可检查候选"
                     _discard_failed_proposal_for_retry(proposal, reason=last_failure)
                     task_data["logs"].append(f"已丢弃未变化的内部提案：{proposal.proposal_id}")
@@ -759,19 +795,21 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
                         )
                     task_data["file_path"] = proposal.file_path
                     candidate_files = proposal_files
+                    candidate_deleted_files = proposal_deleted_files
                     result_code = _primary_content_from_files(candidate_files, proposal.file_path, proposal.result_code)
                     candidate_source = "内部网关提案"
             else:
                 current_tree = _snapshot_workspace_tree(workspace_host_root)
-                collected_files, ignored_paths, tree_changed = _collect_candidate_files(
+                collected_files, deleted_files, ignored_paths, tree_changed = _collect_candidate_files(
                     current_tree,
                     initial_tree,
                     body.file_path,
                 )
                 for ignored_path in ignored_paths[:5]:
                     task_data["logs"].append(f"警告：已忽略插件范围外的工作副本文件变更：{ignored_path}")
-                if tree_changed and collected_files and _candidate_signature(collected_files) not in rejected_signatures:
+                if tree_changed and collected_files and _candidate_signature(collected_files, deleted_files) not in rejected_signatures:
                     candidate_files = collected_files
+                    candidate_deleted_files = deleted_files
                     result_code = _primary_content_from_files(candidate_files, body.file_path, "")
                     candidate_source = "沙盒工作副本"
                     if plugin_top is None:
@@ -815,7 +853,7 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
             if not sandbox_self_check_passed:
                 last_checked_code = result_code
                 if candidate_files:
-                    rejected_signatures.add(_candidate_signature(candidate_files))
+                    rejected_signatures.add(_candidate_signature(candidate_files, candidate_deleted_files))
                 last_failure = sandbox_self_check_failure or (
                     "CC 沙盒未运行通过插件自检命令；请先写入工作副本，运行提供的插件自检命令，"
                     "确认通过后再创建 proposal。"
@@ -850,19 +888,17 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
                 for path, content in candidate_files.items()
                 if path not in (check_file_path, _primary_candidate_path(check_file_path))
             }
-            check_report = await run_plugin_self_check(
-                check_file_path,
-                result_code,
-                extra_files=extra_check_files or None,
-                level="static",
-            )
+            check_kwargs: dict[str, object] = {"extra_files": extra_check_files or None, "level": "static"}
+            if candidate_deleted_files:
+                check_kwargs["deleted_files"] = candidate_deleted_files
+            check_report = await run_plugin_self_check(check_file_path, result_code, **check_kwargs)
             _append_plugin_check_logs(task_data["logs"], check_report, prefix=f"第 {attempt} 轮宿主机复核")
             if check_report.ok:
                 break
 
             last_checked_code = result_code
             if candidate_files:
-                rejected_signatures.add(_candidate_signature(candidate_files))
+                rejected_signatures.add(_candidate_signature(candidate_files, candidate_deleted_files))
             last_failure = summarize_plugin_check(check_report)
             if proposal is not None:
                 _discard_failed_proposal_for_retry(proposal, reason=last_failure)
@@ -907,6 +943,7 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
                 after=result_code,
                 summary=summary,
                 extra_files=extra_proposal_files or None,
+                deleted_files=candidate_deleted_files or None,
             )
         _discard_other_pending_proposals(task_id, proposal.proposal_id)
         task_data.update(
@@ -1016,12 +1053,15 @@ async def apply_proposal(proposal_id: str) -> str:
 
     # 先对全部文件完成路径与并发修改校验，再统一写入，保证多文件应用的原子性
     before_map: dict[str, str] = {}
+    before_exists: dict[str, bool] = {}
     for entry in entries:
         resolve_plugin_file(entry.file_path)
         try:
             entry_before = read_plugin_file(entry.file_path)
-        except Exception:
+            before_exists[entry.file_path] = True
+        except NotFoundError:
             entry_before = ""
+            before_exists[entry.file_path] = False
         before_map[entry.file_path] = entry_before
         if entry.before_sha256 and sha256_text(entry_before) != entry.before_sha256:
             raise ValidationError(
@@ -1030,31 +1070,52 @@ async def apply_proposal(proposal_id: str) -> str:
 
     primary_entry = next((entry for entry in entries if entry.file_path == proposal.file_path), entries[0])
     extra_files = {
-        entry.file_path: entry.content for entry in entries if entry.file_path != primary_entry.file_path
+        entry.file_path: entry.content
+        for entry in entries
+        if entry.file_path != primary_entry.file_path and entry.action == "write"
     }
+    deleted_files = {entry.file_path for entry in entries if entry.action == "delete"}
 
     # 应用前执行完整加载检查（会运行候选代码）。此时用户已审阅 diff 并确认应用，
     # 信任级别等同于让插件在宿主运行；迭代期的自检始终是静态检查。
-    check_report = await run_plugin_self_check(
-        primary_entry.file_path,
-        primary_entry.content,
-        extra_files=extra_files or None,
-        level="smoke",
-    )
+    check_kwargs: dict[str, object] = {"extra_files": extra_files or None, "level": "smoke"}
+    if deleted_files:
+        check_kwargs["deleted_files"] = deleted_files
+    check_report = await run_plugin_self_check(primary_entry.file_path, primary_entry.content, **check_kwargs)
     if not check_report.ok:
         raise ValidationError(reason=f"插件复核未通过: {summarize_plugin_check(check_report)}")
 
     version_ids: dict[str, str] = {}
-    for entry in entries:
-        write_plugin_file(entry.file_path, entry.content)
-        version_ids[entry.file_path] = record_version(
-            file_path=entry.file_path,
-            task_id=proposal.task_id,
-            action="apply_plugin_dev_proposal",
-            before_content=before_map[entry.file_path],
-            after_content=entry.content,
-            summary=proposal.summary,
-        )
+    applied_entries: list[PluginDevProposalFile] = []
+    try:
+        for entry in entries:
+            if entry.action == "delete":
+                resolve_plugin_file(entry.file_path).unlink(missing_ok=True)
+            else:
+                write_plugin_file(entry.file_path, entry.content)
+            applied_entries.append(entry)
+        for entry in entries:
+            version_ids[entry.file_path] = record_version(
+                file_path=entry.file_path,
+                task_id=proposal.task_id,
+                action="apply_plugin_dev_proposal",
+                before_content=before_map[entry.file_path],
+                after_content="" if entry.action == "delete" else entry.content,
+                summary=proposal.summary,
+            )
+    except Exception:
+        for entry in reversed(applied_entries):
+            before_content = before_map[entry.file_path]
+            if not before_exists[entry.file_path]:
+                resolve_plugin_file(entry.file_path).unlink(missing_ok=True)
+            else:
+                write_plugin_file(entry.file_path, before_content)
+        for recorded_file_path, recorded_version_id in reversed(list(version_ids.items())):
+            try:
+                remove_version_record(recorded_file_path, recorded_version_id)
+            except Exception as cleanup_error:
+                logger.error(f"回滚插件版本记录失败: {recorded_file_path} {recorded_version_id}: {cleanup_error}")
+        raise
     version_id = version_ids.get(primary_entry.file_path) or next(iter(version_ids.values()))
 
     proposal_data = proposal.model_dump()

@@ -46,6 +46,7 @@ def stage_plugin_candidate(
     code: str,
     stage_root: Path,
     extra_files: dict[str, str] | None = None,
+    deleted_files: set[str] | None = None,
 ) -> Path:
     """把候选文件集写入暂存目录，返回检查入口路径。
 
@@ -79,6 +80,13 @@ def stage_plugin_candidate(
     _write_staged_file(stage_root, file_path, code)
     for extra_path, extra_content in (extra_files or {}).items():
         _write_staged_file(stage_root, extra_path, extra_content)
+    for deleted_path in deleted_files or set():
+        target = stage_root / normalize_check_relative_path(deleted_path)
+        try:
+            target.resolve().relative_to(stage_root.resolve())
+        except ValueError as e:
+            raise ValidationError(reason=f"候选删除路径越界: {deleted_path}") from e
+        target.unlink(missing_ok=True)
     return target_top
 
 
@@ -96,6 +104,7 @@ async def run_plugin_self_check(
     code: str,
     *,
     extra_files: dict[str, str] | None = None,
+    deleted_files: set[str] | None = None,
     level: str = "smoke",
     timeout_seconds: int | None = None,
 ) -> PluginCheckReport:
@@ -110,7 +119,13 @@ async def run_plugin_self_check(
     with tempfile.TemporaryDirectory(prefix="plugin-dev-self-check-", dir=PLUGIN_DEV_DIR) as temp_root_str:
         temp_root = Path(temp_root_str)
         candidate_root = temp_root / "candidate"
-        candidate_path = stage_plugin_candidate(file_path, code, candidate_root, extra_files=extra_files)
+        candidate_path = stage_plugin_candidate(
+            file_path,
+            code,
+            candidate_root,
+            extra_files=extra_files,
+            deleted_files=deleted_files,
+        )
         report_file = temp_root / "plugin_check_report.json"
         runtime_data_dir = temp_root / "runtime_data"
 

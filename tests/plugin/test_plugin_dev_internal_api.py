@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
@@ -36,7 +37,9 @@ def test_plugin_dev_internal_gateway_creates_proposal_without_writing_file(tmp_p
 
     plugin_root = tmp_path / "plugins"
     proposal_root = tmp_path / "proposals"
+    task_root = tmp_path / "tasks"
     plugin_root.mkdir()
+    task_root.mkdir()
     plugin_file = plugin_root / "demo.py"
     plugin_file.write_text("plugin = None\n", encoding="utf-8")
 
@@ -47,6 +50,25 @@ def test_plugin_dev_internal_gateway_creates_proposal_without_writing_file(tmp_p
     monkeypatch.setattr(
         "nekro_agent.services.plugin_dev.tasks.PLUGIN_DEV_PROPOSAL_DIR",
         proposal_root,
+    )
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.tasks.PLUGIN_DEV_TASK_DIR", task_root)
+    _write_plugin_dev_task_file(task_root, "test-task", "running_cc")
+    (task_root / "test-task-pkg.json").write_text(
+        json.dumps(
+            {
+                "task_id": "test-task-pkg",
+                "file_path": "mypkg/plugin.py",
+                "status": "running_cc",
+                "summary": "",
+                "logs": [],
+                "proposal_id": None,
+                "diff": "",
+                "result_code": "",
+                "error": "",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
     )
     monkeypatch.setattr(PluginDevSandboxService, "get_internal_api_token", staticmethod(lambda: "secret-token"))
 
@@ -186,10 +208,7 @@ def test_plugin_dev_internal_gateway_creates_proposal_without_writing_file(tmp_p
             },
         )
 
-    task_dir = tmp_path / "tasks"
-    task_dir.mkdir()
-    monkeypatch.setattr("nekro_agent.services.plugin_dev.tasks.PLUGIN_DEV_TASK_DIR", task_dir)
-    (task_dir / "finished-task.json").write_text(
+    (task_root / "finished-task.json").write_text(
         json.dumps({"task_id": "finished-task", "file_path": "demo.py", "status": "waiting_apply"}, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -1135,3 +1154,154 @@ def test_plugin_dev_stage_candidate_supports_package_with_extra_files(tmp_path: 
 
     single_entry = stage_plugin_candidate("demo.py", "plugin = None\n", stage_root)
     assert single_entry == stage_root / "demo.py"
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_sandbox_start_is_serialized(monkeypatch):
+    from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
+
+    active_calls = 0
+    max_active_calls = 0
+
+    async def fake_start_unlocked():
+        nonlocal active_calls, max_active_calls
+        active_calls += 1
+        max_active_calls = max(max_active_calls, active_calls)
+        await asyncio.sleep(0.01)
+        active_calls -= 1
+        return SimpleNamespace(status="active")
+
+    monkeypatch.setattr(PluginDevSandboxService, "_start_unlocked", fake_start_unlocked)
+
+    await asyncio.gather(PluginDevSandboxService.start(), PluginDevSandboxService.start())
+
+    assert max_active_calls == 1
+
+
+def test_plugin_dev_rollback_rejects_version_from_other_file(tmp_path: Path, monkeypatch):
+    from nekro_agent.schemas.errors import NotFoundError
+    from nekro_agent.services.plugin_dev import versioning
+    from nekro_agent.services.plugin_dev.host_file_gateway import safe_file_slug
+
+    history_root = tmp_path / "history"
+    current_file = "current.py"
+    other_file = "other.py"
+    foreign_version_id = "20260101-000000-000000"
+
+    current_dir = history_root / safe_file_slug(current_file)
+    other_dir = history_root / safe_file_slug(other_file)
+    current_dir.mkdir(parents=True)
+    other_dir.mkdir(parents=True)
+    (current_dir / "manifest.json").write_text(
+        json.dumps({"file_path": current_file, "current_version_id": None, "versions": []}),
+        encoding="utf-8",
+    )
+    (other_dir / f"{foreign_version_id}-before.py").write_text("foreign\n", encoding="utf-8")
+
+    monkeypatch.setattr(versioning, "PLUGIN_DEV_HISTORY_DIR", history_root)
+    crafted_version_id = f"../{safe_file_slug(other_file)}/{foreign_version_id}"
+
+    with pytest.raises(NotFoundError):
+        versioning.rollback(current_file, crafted_version_id, "before")
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_apply_package_file_deletion(tmp_path: Path, monkeypatch):
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
+    from nekro_agent.services.plugin_dev import tasks
+
+    plugin_root = tmp_path / "plugins"
+    proposal_dir = tmp_path / "proposals"
+    plugin_root.mkdir()
+    pkg_dir = plugin_root / "mypkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
+    (pkg_dir / "legacy.py").write_text("OLD = 1\n", encoding="utf-8")
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+
+    checked_deleted_files: list[set[str]] = []
+
+    async def fake_check(file_path: str, code: str, **kwargs):
+        checked_deleted_files.append(set(kwargs.get("deleted_files") or set()))
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    monkeypatch.setattr(tasks, "run_plugin_self_check", fake_check)
+    monkeypatch.setattr(tasks, "record_version", lambda **kwargs: f"version-{kwargs['file_path']}")
+
+    proposal = tasks.create_proposal(
+        task_id="delete-package-file",
+        file_path="mypkg/plugin.py",
+        before="plugin = None\n",
+        after="plugin = 'updated'\n",
+        summary="删除旧模块",
+        deleted_files={"mypkg/legacy.py"},
+    )
+
+    assert any(item.file_path == "mypkg/legacy.py" and item.action == "delete" for item in proposal.files)
+    await tasks.apply_proposal(proposal.proposal_id)
+
+    assert not (pkg_dir / "legacy.py").exists()
+    assert checked_deleted_files == [{"mypkg/legacy.py"}]
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_apply_record_failure_restores_files_and_history(tmp_path: Path, monkeypatch):
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
+    from nekro_agent.services.plugin_dev import tasks
+
+    plugin_root = tmp_path / "plugins"
+    proposal_dir = tmp_path / "proposals"
+    plugin_root.mkdir()
+    pkg_dir = plugin_root / "mypkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "plugin.py").write_text("plugin = None\n", encoding="utf-8")
+    (pkg_dir / "utils.py").write_text("VALUE = 0\n", encoding="utf-8")
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+
+    async def fake_check(file_path: str, code: str, **_kwargs):
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    record_calls = 0
+    removed_records: list[tuple[str, str]] = []
+
+    def flaky_record_version(**_kwargs):
+        nonlocal record_calls
+        record_calls += 1
+        if record_calls == 2:
+            raise OSError("history write failed")
+        return "version-first"
+
+    monkeypatch.setattr(tasks, "run_plugin_self_check", fake_check)
+    monkeypatch.setattr(tasks, "record_version", flaky_record_version)
+    monkeypatch.setattr(
+        tasks,
+        "remove_version_record",
+        lambda file_path, version_id: removed_records.append((file_path, version_id)),
+    )
+
+    proposal = tasks.create_proposal(
+        task_id="record-failure",
+        file_path="mypkg/plugin.py",
+        before="plugin = None\n",
+        after="plugin = 'updated'\n",
+        summary="原子应用",
+        extra_files={"mypkg/utils.py": ("VALUE = 0\n", "VALUE = 1\n")},
+    )
+
+    with pytest.raises(OSError, match="history write failed"):
+        await tasks.apply_proposal(proposal.proposal_id)
+
+    assert (pkg_dir / "plugin.py").read_text(encoding="utf-8") == "plugin = None\n"
+    assert (pkg_dir / "utils.py").read_text(encoding="utf-8") == "VALUE = 0\n"
+    assert removed_records == [("mypkg/plugin.py", "version-first")]
+    assert tasks.get_proposal(proposal.proposal_id).status == "pending"

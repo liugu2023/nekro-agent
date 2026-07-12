@@ -7,98 +7,77 @@ export interface PluginEditorApi {
   // 获取插件文件列表
   getPluginFiles: () => Promise<string[]>
   // 获取插件文件内容
-  getPluginFileContent: (filePath: string) => Promise<string | null>
+  getPluginFileContent: (filePath: string) => Promise<string>
   // 保存插件文件
-  savePluginFile: (filePath: string, content: string) => Promise<boolean>
+  savePluginFile: (filePath: string, content: string) => Promise<void>
   // 删除插件文件
-  deletePluginFile: (filePath: string) => Promise<boolean>
+  deletePluginFile: (filePath: string) => Promise<void>
   // 导出插件文件
-  exportPluginFile: (filePath: string) => Promise<boolean>
+  exportPluginFile: (filePath: string) => Promise<void>
   // 生成插件代码
   generatePluginCode: (
     filePath: string,
     prompt: string,
     currentCode?: string
-  ) => Promise<string | null>
+  ) => Promise<string>
   // 应用生成的代码
   applyGeneratedCode: (
     filePath: string,
     prompt: string,
     currentCode: string
-  ) => Promise<string | null>
+  ) => Promise<string>
   // 生成插件模板
-  generatePluginTemplate: (name: string, description: string) => Promise<string | null>
+  generatePluginTemplate: (name: string, description: string) => Promise<string>
 }
 
 export const pluginEditorApi: PluginEditorApi = {
   // 获取插件文件列表
   getPluginFiles: async (): Promise<string[]> => {
-    try {
-      const response = await axios.get<string[]>('/plugin-editor/files')
-      return response.data
-    } catch (_error) {
-      return []
-    }
+    const response = await axios.get<string[]>('/plugin-editor/files')
+    return response.data
   },
 
   // 获取插件文件内容
-  getPluginFileContent: async (filePath: string): Promise<string | null> => {
-    try {
-      const response = await axios.get<{ content: string }>(`/plugin-editor/file/${encodePathParam(filePath)}`)
-      return response.data.content
-    } catch (_error) {
-      return null
-    }
+  getPluginFileContent: async (filePath: string): Promise<string> => {
+    const response = await axios.get<{ content: string }>(`/plugin-editor/file/${encodePathParam(filePath)}`)
+    return response.data.content
   },
 
   // 保存插件文件
-  savePluginFile: async (filePath: string, content: string): Promise<boolean> => {
-    try {
-      const response = await axios.post<{ ok: boolean }>(`/plugin-editor/file/${encodePathParam(filePath)}`, content, {
-        headers: {
-          'Content-Type': 'text/plain',
-        },
-      })
-      return response.data.ok
-    } catch (_error) {
-      return false
+  savePluginFile: async (filePath: string, content: string): Promise<void> => {
+    const response = await axios.post<{ ok: boolean }>(`/plugin-editor/file/${encodePathParam(filePath)}`, content, {
+      headers: {
+        'Content-Type': 'text/plain',
+      },
+    })
+    if (!response.data.ok) {
+      throw new Error('保存插件文件失败')
     }
   },
 
   // 删除插件文件
-  deletePluginFile: async (filePath: string): Promise<boolean> => {
-    try {
-      const response = await axios.delete<{ ok: boolean }>(`/plugin-editor/files/${encodePathParam(filePath)}`)
-      return response.data.ok
-    } catch (_error) {
-      return false
+  deletePluginFile: async (filePath: string): Promise<void> => {
+    const response = await axios.delete<{ ok: boolean }>(`/plugin-editor/files/${encodePathParam(filePath)}`)
+    if (!response.data.ok) {
+      throw new Error('删除插件文件失败')
     }
   },
 
   // 导出插件文件
-  exportPluginFile: async (filePath: string): Promise<boolean> => {
-    try {
-      // 获取文件内容
-      const content = await pluginEditorApi.getPluginFileContent(filePath)
-      if (!content) {
-        throw new Error('无法获取文件内容')
-      }
+  exportPluginFile: async (filePath: string): Promise<void> => {
+    // 获取文件内容
+    const content = await pluginEditorApi.getPluginFileContent(filePath)
 
-      // 创建一个下载链接
-      const blob = new Blob([content], { type: 'text/plain' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filePath.split('/').pop() || 'plugin_file.txt'
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-
-      return true
-    } catch (_error) {
-      return false
-    }
+    // 创建一个下载链接
+    const blob = new Blob([content], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filePath.split('/').pop() || 'plugin_file.txt'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
   },
 
   // 生成插件代码
@@ -106,17 +85,13 @@ export const pluginEditorApi: PluginEditorApi = {
     filePath: string,
     prompt: string,
     currentCode?: string
-  ): Promise<string | null> => {
-    try {
-      const response = await axios.post<{ code: string }>('/plugin-editor/generate', {
-        file_path: filePath,
-        prompt,
-        current_code: currentCode,
-      })
-      return response.data.code
-    } catch (_error) {
-      return null
-    }
+  ): Promise<string> => {
+    const response = await axios.post<{ code: string }>('/plugin-editor/generate', {
+      file_path: filePath,
+      prompt,
+      current_code: currentCode,
+    })
+    return response.data.code
   },
 
   // 应用生成的代码
@@ -124,36 +99,28 @@ export const pluginEditorApi: PluginEditorApi = {
     filePath: string,
     prompt: string,
     currentCode: string
-  ): Promise<string | null> => {
-    try {
-      const response = await axios.post<{ code: string }>(
-        '/plugin-editor/apply',
-        {
-          file_path: filePath,
-          prompt,
-          current_code: currentCode,
-        },
-        {
-          timeout: 60000,
-        }
-      )
-      return response.data.code
-    } catch (_error) {
-      return null
-    }
+  ): Promise<string> => {
+    const response = await axios.post<{ code: string }>(
+      '/plugin-editor/apply',
+      {
+        file_path: filePath,
+        prompt,
+        current_code: currentCode,
+      },
+      {
+        timeout: 60000,
+      }
+    )
+    return response.data.code
   },
 
   // 生成插件模板
-  generatePluginTemplate: async (name: string, description: string): Promise<string | null> => {
-    try {
-      const response = await axios.post<{ template: string }>('/plugin-editor/template', {
-        name,
-        description,
-      })
-      return response.data.template
-    } catch (_error) {
-      return null
-    }
+  generatePluginTemplate: async (name: string, description: string): Promise<string> => {
+    const response = await axios.post<{ template: string }>('/plugin-editor/template', {
+      name,
+      description,
+    })
+    return response.data.template
   },
 }
 

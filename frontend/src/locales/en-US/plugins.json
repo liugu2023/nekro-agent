@@ -218,6 +218,7 @@
     "validation": {
       "emptyName": "Please enter plugin name",
       "invalidName": "Plugin name can only contain lowercase letters, numbers and underscores, must start with a letter",
+      "pluginAlreadyExists": "A plugin with this name already exists",
       "emptyDescription": "Please enter plugin description"
     },
     "messages": {
@@ -232,6 +233,7 @@
       "importFailed": "Failed to import file",
       "createSuccess": "Plugin created successfully",
       "createFailed": "Failed to create plugin",
+      "createCleanupFailed": "{{saveMessage}}; cleanup did not complete: {{cleanupMessage}}",
       "deleteSuccess": "File deleted successfully",
       "deleteFailed": "Delete failed",
       "selectPluginFirst": "Please select a plugin file first",

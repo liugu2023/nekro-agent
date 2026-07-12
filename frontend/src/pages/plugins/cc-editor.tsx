@@ -1061,20 +1061,22 @@ export default function PluginCcEditorPage() {
       const draft = safeParseDraft(window.localStorage.getItem(PLUGIN_CC_EDITOR_DRAFT_KEY))
       const draftFile = draft?.selectedFile && pluginFiles.includes(draft.selectedFile) ? draft.selectedFile : ''
       if (draftFile) {
+        const diskContent = await pluginEditorApi.getPluginFileContent(draftFile)
+        const canRestoreCode = typeof draft.originalCode === 'string' && diskContent === draft.originalCode
         setSelectedFile(draftFile)
-        setCode(draft.code || '')
-        setOriginalCode(draft.originalCode || '')
+        setCode(canRestoreCode ? draft.code || '' : diskContent)
+        setOriginalCode(diskContent)
         setPrompt(draft.prompt || '')
-        setGeneratedCode(draft.generatedCode || '')
+        setGeneratedCode(canRestoreCode ? draft.generatedCode || '' : '')
         setActiveTaskId(draft.taskId || '')
         restoredTaskIdRef.current = draft.taskId || null
         return
       }
       if (!selectedFile && pluginFiles[0]) {
-        setSelectedFile(pluginFiles[0])
         const content = await pluginEditorApi.getPluginFileContent(pluginFiles[0])
-        setCode(content || '')
-        setOriginalCode(content || '')
+        setSelectedFile(pluginFiles[0])
+        setCode(content)
+        setOriginalCode(content)
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
@@ -1140,11 +1142,11 @@ export default function PluginCcEditorPage() {
     stopTaskPolling()
     restoredTaskIdRef.current = null
     syncedCandidateKeyRef.current = ''
-    setSelectedFile(file)
     try {
       const content = await pluginEditorApi.getPluginFileContent(file)
-      setCode(content || '')
-      setOriginalCode(content || '')
+      setSelectedFile(file)
+      setCode(content)
+      setOriginalCode(content)
       setGeneratedCode('')
       setTask(null)
       setActiveTaskId('')
@@ -1387,11 +1389,33 @@ export default function PluginCcEditorPage() {
     try {
       const template = await pluginEditorApi.generatePluginTemplate(name, description)
       const selectedPluginFile = newPluginCreateMode === 'folder' ? `${name}/plugin.py` : `${name}.py`
+      const latestPluginFiles = await pluginEditorApi.getPluginFiles()
+      const pluginAlreadyExists = newPluginCreateMode === 'folder'
+        ? latestPluginFiles.some(filePath => filePath.startsWith(`${name}/`))
+        : latestPluginFiles.some(filePath => filePath === `${name}.py` || filePath === `${name}.py.disabled`)
+      if (pluginAlreadyExists) {
+        notification.error(t('editor.validation.pluginAlreadyExists'))
+        return
+      }
       if (newPluginCreateMode === 'folder') {
-        await pluginEditorApi.savePluginFile(`${name}/__init__.py`, 'from .plugin import plugin\n')
-        await pluginEditorApi.savePluginFile(selectedPluginFile, template || '')
+        const initFile = `${name}/__init__.py`
+        await pluginEditorApi.savePluginFile(initFile, 'from .plugin import plugin\n')
+        try {
+          await pluginEditorApi.savePluginFile(selectedPluginFile, template)
+        } catch (error) {
+          try {
+            await pluginEditorApi.deletePluginFile(initFile)
+          } catch (cleanupError) {
+            const saveMessage = error instanceof Error ? error.message : t('editor.messages.unknownError')
+            const cleanupMessage = cleanupError instanceof Error
+              ? cleanupError.message
+              : t('editor.messages.unknownError')
+            throw new Error(t('editor.messages.createCleanupFailed', { saveMessage, cleanupMessage }))
+          }
+          throw error
+        }
       } else {
-        await pluginEditorApi.savePluginFile(selectedPluginFile, template || '')
+        await pluginEditorApi.savePluginFile(selectedPluginFile, template)
       }
       const pluginFiles = await pluginEditorApi.getPluginFiles()
       stopTaskStream()
@@ -1399,8 +1423,8 @@ export default function PluginCcEditorPage() {
       restoredTaskIdRef.current = null
       setFiles(pluginFiles)
       setSelectedFile(selectedPluginFile)
-      setCode(template || '')
-      setOriginalCode(template || '')
+      setCode(template)
+      setOriginalCode(template)
       setPrompt('')
       setGeneratedCode('')
       setTask(null)

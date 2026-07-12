@@ -218,6 +218,7 @@
     "validation": {
       "emptyName": "请输入插件名称",
       "invalidName": "插件名称只能包含小写字母、数字和下划线，且必须以字母开头",
+      "pluginAlreadyExists": "同名插件已存在，请更换名称",
       "emptyDescription": "请输入插件描述"
     },
     "messages": {
@@ -232,6 +233,7 @@
       "importFailed": "导入文件失败",
       "createSuccess": "插件创建成功",
       "createFailed": "创建插件失败",
+      "createCleanupFailed": "{{saveMessage}}；清理未完成：{{cleanupMessage}}",
       "deleteSuccess": "文件删除成功",
       "deleteFailed": "删除失败",
       "selectPluginFirst": "请先选择一个插件文件",

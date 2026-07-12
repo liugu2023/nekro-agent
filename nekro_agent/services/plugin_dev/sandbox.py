@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import secrets
@@ -261,6 +262,8 @@ class PluginDevSandboxRuntimeInfo(BaseModel):
 
 
 class PluginDevSandboxService:
+    _lifecycle_lock = asyncio.Lock()
+
     @staticmethod
     def _utc_now() -> str:
         return datetime.now(timezone.utc).isoformat()
@@ -624,6 +627,11 @@ class PluginDevSandboxService:
 
     @staticmethod
     async def start() -> PluginDevSandboxState:
+        async with PluginDevSandboxService._lifecycle_lock:
+            return await PluginDevSandboxService._start_unlocked()
+
+    @staticmethod
+    async def _start_unlocked() -> PluginDevSandboxState:
         state = PluginDevSandboxService._ensure_state()
         PluginDevSandboxService._write_runtime_files()
         reference_source_dir, reference_source_message = await PluginDevSandboxService._ensure_reference_source()
@@ -721,6 +729,11 @@ class PluginDevSandboxService:
 
     @staticmethod
     async def stop() -> PluginDevSandboxState:
+        async with PluginDevSandboxService._lifecycle_lock:
+            return await PluginDevSandboxService._stop_unlocked()
+
+    @staticmethod
+    async def _stop_unlocked() -> PluginDevSandboxState:
         state = PluginDevSandboxService._ensure_state()
         if state.container_name:
             docker = aiodocker.Docker()

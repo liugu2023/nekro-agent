@@ -130,10 +130,19 @@ async def delete_plugin_file(
     if not full_path.exists():
         raise NotFoundError(resource=f"文件 {file_path}")
 
-    # 按顶层模块名卸载（包内文件删除时卸载其所属的顶层包插件）
+    # 按顶层模块名卸载（包内文件删除时卸载其所属的顶层包插件），
+    # 避免已注册的命令、路由继续引用即将删除的旧模块。
     await plugin_collector.unload_plugin_by_module_name(file_path)
 
     full_path.unlink()
+
+    relative_path = full_path.relative_to(plugin_dir)
+    top_level_package_entry = plugin_dir / relative_path.parts[0] / "__init__.py"
+    if len(relative_path.parts) > 1 and top_level_package_entry.exists():
+        # 删除普通包内文件后恢复顶层包运行。若删除的是被入口依赖的模块，
+        # collector 会记录加载失败并让插件保持卸载，文件删除本身仍视为成功。
+        await plugin_collector.reload_plugin_by_module_name(relative_path.parts[0])
+
     return ActionResponse(ok=True)
 
 

@@ -88,6 +88,102 @@ async def test_reload_resolves_package_inner_file_to_top_package(tmp_path: Path,
     assert loaded_paths == [collector.workdir_plugin_dir / "solo.py"]
 
 
+@pytest.mark.asyncio
+async def test_reload_preserves_loaded_plugin_type(tmp_path: Path, monkeypatch):
+    collector = _make_collector_with_dirs(tmp_path)
+    pkg_dir = collector.packages_dir / "cloud_pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("plugin = None\n", encoding="utf-8")
+
+    loaded_plugin = SimpleNamespace(
+        module_name="cloud_pkg",
+        is_builtin=False,
+        is_package=True,
+        _module=SimpleNamespace(__name__="packages.cloud_pkg"),
+        _commands=[],
+        cleanup_method=None,
+        key="author.cloud_pkg",
+    )
+    collector.loaded_plugins = {loaded_plugin.key: loaded_plugin}
+    collector.loaded_module_names = {"packages.cloud_pkg"}
+    loaded_types: list[tuple[bool, bool]] = []
+
+    async def fake_try_load(item_path: Path, is_builtin: bool = False, is_package: bool = False) -> bool:
+        assert item_path == pkg_dir / "__init__.py"
+        loaded_types.append((is_builtin, is_package))
+        return True
+
+    monkeypatch.setattr(collector, "_try_load_plugin", fake_try_load)
+
+    await collector.reload_plugin_by_module_name("cloud_pkg")
+
+    assert loaded_types == [(False, True)]
+
+
+@pytest.mark.asyncio
+async def test_reload_infers_plugin_type_from_source_directory(tmp_path: Path, monkeypatch):
+    collector = _make_collector_with_dirs(tmp_path)
+    builtin_file = collector.builtin_plugin_dir / "builtin_demo.py"
+    package_file = collector.packages_dir / "cloud_demo.py"
+    builtin_file.write_text("plugin = None\n", encoding="utf-8")
+    package_file.write_text("plugin = None\n", encoding="utf-8")
+    loaded_types: list[tuple[Path, bool, bool]] = []
+
+    async def fake_try_load(item_path: Path, is_builtin: bool = False, is_package: bool = False) -> bool:
+        loaded_types.append((item_path, is_builtin, is_package))
+        return True
+
+    monkeypatch.setattr(collector, "_try_load_plugin", fake_try_load)
+
+    await collector.reload_plugin_by_module_name("builtin_demo")
+    await collector.reload_plugin_by_module_name("cloud_demo")
+
+    assert loaded_types == [
+        (builtin_file, True, False),
+        (package_file, False, True),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("file_path", "expected_reload"),
+    [("mypkg/helper.py", ["mypkg"]), ("mypkg/__init__.py", [])],
+)
+async def test_delete_package_file_reload_rules(
+    tmp_path: Path,
+    monkeypatch,
+    file_path: str,
+    expected_reload: list[str],
+):
+    from nekro_agent.routers import plugin_editor
+
+    pkg_dir = tmp_path / "mypkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("from .plugin import plugin\n", encoding="utf-8")
+    target_file = tmp_path / file_path
+    if not target_file.exists():
+        target_file.write_text("VALUE = 1\n", encoding="utf-8")
+    unloaded: list[str] = []
+    reloaded: list[str] = []
+
+    async def fake_unload(module_name: str) -> None:
+        unloaded.append(module_name)
+
+    async def fake_reload(module_name: str) -> None:
+        reloaded.append(module_name)
+
+    monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.setattr(plugin_editor.plugin_collector, "unload_plugin_by_module_name", fake_unload)
+    monkeypatch.setattr(plugin_editor.plugin_collector, "reload_plugin_by_module_name", fake_reload)
+
+    response = await plugin_editor.delete_plugin_file.__wrapped__(file_path, _current_user=SimpleNamespace())
+
+    assert response.ok is True
+    assert not target_file.exists()
+    assert unloaded == [file_path]
+    assert reloaded == expected_reload
+
+
 def test_get_plugin_by_module_name_falls_back_to_normalized_name(tmp_path: Path):
     collector = _make_collector_with_dirs(tmp_path)
     fake_plugin = SimpleNamespace(

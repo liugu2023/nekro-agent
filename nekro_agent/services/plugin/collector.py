@@ -268,37 +268,55 @@ class PluginCollector:
             return path / "__init__.py"
         return path.with_suffix(".py")
 
-    async def reload_plugin_by_module_name(self, module_name: str, is_builtin: bool = False, is_package: bool = False):
+    async def reload_plugin_by_module_name(
+        self,
+        module_name: str,
+        is_builtin: Optional[bool] = None,
+        is_package: Optional[bool] = None,
+    ) -> None:
         """重新加载指定插件
 
         module_name 兼容文件路径形态（如 `demo.py`、`mypkg/plugin.py`、
         `mypkg/__init__.py`）；包内文件会被解析为顶层包插件后整体重载。
+
+        未显式指定插件类型时，优先继承已加载插件的类型；插件尚未加载时，
+        则根据实际加载目录推断，避免通用重载将内置或云端插件误标为本地插件。
         """
         fixed_module_name = self.normalize_plugin_module_name(module_name)
 
-        plugin_base_dirs = (self.builtin_plugin_dir, self.workdir_plugin_dir, self.packages_dir)
-        exists_paths = [
-            self._to_load_path(base_dir / fixed_module_name)
-            for base_dir in plugin_base_dirs
+        plugin_sources = (
+            (self.builtin_plugin_dir, True, False),
+            (self.workdir_plugin_dir, False, False),
+            (self.packages_dir, False, True),
+        )
+        existing_sources = [
+            (self._to_load_path(base_dir / fixed_module_name), source_is_builtin, source_is_package)
+            for base_dir, source_is_builtin, source_is_package in plugin_sources
             if self._check_module_exists(base_dir / fixed_module_name)
         ]
-        if len(exists_paths) == 0:
+        if len(existing_sources) == 0:
             disabled_markers = [
-                *(base_dir / f"{fixed_module_name}.py.disabled" for base_dir in plugin_base_dirs),
-                *(base_dir / fixed_module_name / "__init__.py.disabled" for base_dir in plugin_base_dirs),
+                *(base_dir / f"{fixed_module_name}.py.disabled" for base_dir, _, _ in plugin_sources),
+                *(base_dir / fixed_module_name / "__init__.py.disabled" for base_dir, _, _ in plugin_sources),
             ]
             if any(marker.exists() for marker in disabled_markers):
                 raise ValueError(f"插件 `{fixed_module_name}` 处于禁用状态，请先启用插件后再重载")
             raise ValueError(f"插件 `{fixed_module_name}` 不存在")
 
-        if len(exists_paths) > 1:
+        if len(existing_sources) > 1:
             logger.warning(
                 f"在多个加载目录中发现了重复插件 `{fixed_module_name}`，将按照以下优先级加载：内置插件 > 工作目录插件 > 云端插件",
             )
 
-        real_path = exists_paths[0]
+        real_path, source_is_builtin, source_is_package = existing_sources[0]
 
         loaded_plugin = self.get_plugin_by_module_name(fixed_module_name)
+        resolved_is_builtin = (
+            is_builtin if is_builtin is not None else loaded_plugin.is_builtin if loaded_plugin else source_is_builtin
+        )
+        resolved_is_package = (
+            is_package if is_package is not None else loaded_plugin.is_package if loaded_plugin else source_is_package
+        )
         if loaded_plugin:
             logger.info(f"插件 `{fixed_module_name}` 已加载，正在重载...")
             # 卸载插件命令
@@ -315,7 +333,11 @@ class PluginCollector:
             self._pop_stale_plugin_modules(fixed_module_name)
 
         # logger.debug(f"尝试加载插件: {real_path} 从 {fixed_module_name}")
-        await self._try_load_plugin(real_path, is_builtin=is_builtin, is_package=is_package)
+        await self._try_load_plugin(
+            real_path,
+            is_builtin=resolved_is_builtin,
+            is_package=resolved_is_package,
+        )
 
         # 重载完成后，如果插件有路由，进行热重载
         try:

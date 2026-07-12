@@ -165,8 +165,8 @@ def record_version(
     history_dir = _history_dir(file_path)
     history_dir.mkdir(parents=True, exist_ok=True)
 
-    (history_dir / f"{version_id}-before.py").write_text(before_content, encoding="utf-8")
-    (history_dir / f"{version_id}-after.py").write_text(after_content, encoding="utf-8")
+    before_path = history_dir / f"{version_id}-before.py"
+    after_path = history_dir / f"{version_id}-after.py"
 
     item = PluginDevHistoryItem(
         version_id=version_id,
@@ -181,16 +181,41 @@ def record_version(
     )
 
     manifest_path = _manifest_path(file_path)
-    manifest = _read_json(manifest_path, {"file_path": file_path, "current_version_id": None, "versions": []})
-    versions = list(manifest.get("versions", []))
-    versions.append(item.model_dump())
-    manifest["versions"] = _prune_versions(history_dir, versions)
-    manifest["current_version_id"] = version_id
-    _write_json(manifest_path, manifest)
+    try:
+        before_path.write_text(before_content, encoding="utf-8")
+        after_path.write_text(after_content, encoding="utf-8")
+        manifest = _read_json(manifest_path, {"file_path": file_path, "current_version_id": None, "versions": []})
+        versions = list(manifest.get("versions", []))
+        versions.append(item.model_dump())
+        manifest["versions"] = _prune_versions(history_dir, versions)
+        manifest["current_version_id"] = version_id
+        _write_json(manifest_path, manifest)
+    except Exception:
+        before_path.unlink(missing_ok=True)
+        after_path.unlink(missing_ok=True)
+        raise
     return version_id
 
 
+def remove_version_record(file_path: str, version_id: str) -> None:
+    """撤销一次已成功写入的版本记录，用于多文件应用失败回滚。"""
+    manifest_path = _manifest_path(file_path)
+    manifest = _read_json(manifest_path, {"file_path": file_path, "current_version_id": None, "versions": []})
+    versions = [item for item in manifest.get("versions", []) if str(item.get("version_id") or "") != version_id]
+    manifest["versions"] = versions
+    if manifest.get("current_version_id") == version_id:
+        manifest["current_version_id"] = str(versions[-1].get("version_id") or "") if versions else None
+    _write_json(manifest_path, manifest)
+    history_dir = _history_dir(file_path)
+    for suffix in ("before", "after"):
+        (history_dir / f"{version_id}-{suffix}.py").unlink(missing_ok=True)
+
+
 def rollback(file_path: str, version_id: str, target: str) -> str:
+    history = get_history(file_path)
+    if version_id not in {item.version_id for item in history.versions}:
+        raise NotFoundError(resource=f"文件 {file_path} 的版本 {version_id}")
+
     history_dir = _history_dir(file_path)
     source = history_dir / f"{version_id}-{target}.py"
     if not source.exists():

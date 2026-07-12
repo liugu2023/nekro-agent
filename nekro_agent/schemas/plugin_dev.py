@@ -105,6 +105,7 @@ class PluginDevInternalProposalRequest(BaseModel):
     task_id: str = Field(default="plugin-dev-internal", min_length=1)
     summary: str = Field(default="由插件开发沙盒创建写入提案")
     files: list[PluginDevInternalFilePayload] = Field(default_factory=list)
+    deleted_files: list[str] = Field(default_factory=list)
 
 
 class PluginDevInternalCheckRequest(BaseModel):
@@ -113,6 +114,7 @@ class PluginDevInternalCheckRequest(BaseModel):
     task_id: str = Field(default="plugin-dev-internal", min_length=1)
     level: Literal["static", "load", "smoke", "strict"] = "static"
     files: list[PluginDevInternalFilePayload] = Field(default_factory=list)
+    deleted_files: list[str] = Field(default_factory=list)
 
 
 class PluginDevGenerateResponse(BaseModel):
@@ -136,8 +138,9 @@ class PluginDevTaskResponse(BaseModel):
 
 class PluginDevProposalFile(BaseModel):
     file_path: str
-    content: str
+    content: str = ""
     before_sha256: str = ""
+    action: Literal["write", "delete"] = "write"
 
 
 class PluginDevProposalResponse(BaseModel):
