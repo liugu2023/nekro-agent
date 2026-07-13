@@ -237,10 +237,12 @@
       "createCleanupFailed": "{{saveMessage}}; cleanup did not complete: {{cleanupMessage}}",
       "deleteSuccess": "File deleted successfully",
       "deleteFailed": "Delete failed",
+      "deleteRefreshFailed": "The file was deleted, but the file list could not be refreshed",
       "selectPluginFirst": "Please select a plugin file first",
       "invalidModuleName": "Cannot get valid module name",
       "reloadFailed": "Failed to reload plugin",
       "reloadSuccess": "Plugin {{name}} reloaded successfully",
+      "reloadRefreshFailed": "The plugin was reloaded, but the file list could not be refreshed",
       "toggleSuccess": "Plugin {{action}} successfully",
       "toggleFailed": "Failed to {{action}} plugin",
       "codeCopied": "Code copied to clipboard",
@@ -252,6 +254,10 @@
       "pluginDevProposalReady": "Background CC proposal is ready",
       "pluginDevProposalApplied": "Proposal written, version: {{version}}",
       "pluginDevRollbackSuccess": "Rolled back and wrote a new version: {{version}}",
+      "pluginDevRollbackDeletedSuccess": "Rolled back to the file-not-existing state: {{version}}",
+      "rollbackFailed": "Rollback failed",
+      "rollbackRefreshFailed": "Rollback succeeded, but the editor could not be refreshed",
+      "proposalStateReconciled": "The proposal was updated in another tab and this page is now synchronized",
       "pluginDevStarted": "Plugin dev sandbox started",
       "pluginDevStartFailed": "Failed to start plugin dev sandbox",
       "pluginDevConfigSaved": "Plugin dev sandbox config saved",
@@ -278,7 +284,8 @@
       "reloadTitle": "Confirm Reload",
       "reloadMessage": "Are you sure you want to reload the current plugin? This will reinitialize the plugin and apply code changes.",
       "toggleTitle": "{{action}} Plugin",
-      "toggleMessage": "Are you sure you want to {{action}} the current plugin?"
+      "toggleMessage": "Are you sure you want to {{action}} the current plugin?",
+      "unsavedSwitchMessage": "This file has unsaved changes. Switching files will discard them. Continue?"
     },
     "generatorModes": {
       "basic": "Basic",

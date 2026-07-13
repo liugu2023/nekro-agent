@@ -9,7 +9,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from nekro_agent.core.os_env import WORKDIR_PLUGIN_DIR
 from nekro_agent.models.db_user import DBUser
-from nekro_agent.schemas.errors import NotFoundError, ValidationError
+from nekro_agent.schemas.errors import NotFoundError, PluginLoadError, ValidationError
 from nekro_agent.services.plugin.collector import plugin_collector
 from nekro_agent.services.plugin.generator import (
     apply_plugin_code,
@@ -138,16 +138,17 @@ async def delete_plugin_file(
 
     try:
         full_path.unlink()
-    except OSError:
-        if was_loaded:
-            await plugin_collector.reload_plugin_by_module_name(module_name)
+    except OSError as exc:
+        if was_loaded and not await plugin_collector.reload_plugin_by_module_name(module_name):
+            raise PluginLoadError(plugin_id=module_name, detail="删除文件失败后无法恢复插件运行状态") from exc
         raise
 
     top_level_package_entry = plugin_dir / relative_path.parts[0] / "__init__.py"
     if len(relative_path.parts) > 1 and top_level_package_entry.exists():
         # 删除普通包内文件后恢复顶层包运行。若删除的是被入口依赖的模块，
         # collector 会记录加载失败并让插件保持卸载，文件删除本身仍视为成功。
-        await plugin_collector.reload_plugin_by_module_name(relative_path.parts[0])
+        if not await plugin_collector.reload_plugin_by_module_name(relative_path.parts[0]):
+            raise PluginLoadError(plugin_id=relative_path.parts[0], detail="文件已删除，但插件重新加载失败")
 
     return ActionResponse(ok=True)
 
@@ -177,15 +178,20 @@ async def toggle_plugin_file(
         await plugin_collector.unload_plugin_by_module_name(module_name)
         try:
             full_path.rename(target_path)
-        except OSError:
-            if was_loaded:
-                await plugin_collector.reload_plugin_by_module_name(module_name)
+        except OSError as exc:
+            if was_loaded and not await plugin_collector.reload_plugin_by_module_name(module_name):
+                raise PluginLoadError(plugin_id=module_name, detail="禁用文件失败后无法恢复插件运行状态") from exc
             raise
     else:
         full_path.rename(target_path)
         target_relative_path = target_path.relative_to(plugin_dir)
         reload_ref = target_relative_path.parts[0] if len(target_relative_path.parts) > 1 else target_relative_path.as_posix()
-        await plugin_collector.reload_plugin_by_module_name(reload_ref)
+        if not await plugin_collector.reload_plugin_by_module_name(reload_ref):
+            try:
+                target_path.rename(full_path)
+            except OSError as exc:
+                raise PluginLoadError(plugin_id=module_name, detail="插件加载失败，且无法恢复禁用文件名") from exc
+            raise PluginLoadError(plugin_id=module_name)
 
     return ToggleFileResponse(ok=True, file_path=target_path.relative_to(plugin_dir).as_posix())
 

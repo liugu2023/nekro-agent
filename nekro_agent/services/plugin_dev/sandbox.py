@@ -743,10 +743,20 @@ class PluginDevSandboxService:
                     container = await docker.containers.get(state.container_name)
                     await container.stop(t=10)
                 except Exception as e:
-                    logger.warning(f"停止插件开发沙盒容器失败（忽略）: {state.container_name}: {e}")
+                    logger.warning(f"停止插件开发沙盒容器失败: {state.container_name}: {e}")
+                    state.status = (
+                        "active"
+                        if await PluginDevSandboxService._container_running(state.container_name)
+                        else "failed"
+                    )
+                    state.last_error = f"停止容器失败: {e}"
+                    return PluginDevSandboxService._save_state(state)
             finally:
                 await docker.close()
         state.status = "stopped"
+        state.last_error = None
+        # 停止成功后立即轮换内部网关 token，使旧容器持有的凭据失效。
+        state.sandbox_api_token = secrets.token_urlsafe(32)
         return PluginDevSandboxService._save_state(state)
 
     @staticmethod

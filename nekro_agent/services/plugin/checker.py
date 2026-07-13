@@ -96,8 +96,12 @@ def _resolve_candidate_layout(candidate_path: Path) -> CandidateLayout:
 
     warnings: list[str] = []
     if resolved.is_dir():
-        if not (resolved / "__init__.py").exists():
-            raise ValueError(f"目录插件必须包含 __init__.py: {resolved}")
+        package_init = resolved / "__init__.py"
+        disabled_package_init = resolved / "__init__.py.disabled"
+        if not package_init.exists() and not disabled_package_init.exists():
+            raise ValueError(f"目录插件必须包含 __init__.py 或 __init__.py.disabled: {resolved}")
+        if not package_init.exists():
+            warnings.append("检测到禁用的包插件入口，检查时将暂存为 __init__.py。")
         return CandidateLayout(
             source_path=resolved,
             root_path=resolved,
@@ -113,7 +117,8 @@ def _resolve_candidate_layout(candidate_path: Path) -> CandidateLayout:
         warnings.append("检测到禁用插件文件，检查时将按启用后的 .py 文件名暂存。")
 
     package_init = resolved.parent / "__init__.py"
-    if resolved.name == "__init__.py" and package_init.exists():
+    disabled_package_init = resolved.parent / "__init__.py.disabled"
+    if resolved.name in {"__init__.py", "__init__.py.disabled"}:
         return CandidateLayout(
             source_path=resolved,
             root_path=resolved.parent,
@@ -122,8 +127,9 @@ def _resolve_candidate_layout(candidate_path: Path) -> CandidateLayout:
             warnings=warnings,
         )
 
-    if package_init.exists():
-        warnings.append(f"检测到包结构，实际将按包入口 {package_init} 进行检查。")
+    package_entry = package_init if package_init.exists() else disabled_package_init
+    if package_entry.exists():
+        warnings.append(f"检测到包结构，实际将按包入口 {package_entry} 进行检查。")
         return CandidateLayout(
             source_path=resolved,
             root_path=resolved.parent,
@@ -154,6 +160,10 @@ def _stage_candidate(layout: CandidateLayout) -> Path:
             else:
                 target.unlink()
         shutil.copytree(layout.root_path, target, ignore=ignore)
+        disabled_init = target / "__init__.py.disabled"
+        enabled_init = target / "__init__.py"
+        if disabled_init.exists() and not enabled_init.exists():
+            disabled_init.rename(enabled_init)
         return target
 
     target = workdir_root / _enabled_file_name(layout.root_path)
@@ -201,7 +211,8 @@ _ASYNC_REQUIRED_MOUNT_DECORATORS = {
 def _static_entry_file(layout: CandidateLayout) -> Path:
     if layout.mode == "file":
         return layout.source_path
-    return layout.root_path / "__init__.py"
+    enabled_init = layout.root_path / "__init__.py"
+    return enabled_init if enabled_init.exists() else layout.root_path / "__init__.py.disabled"
 
 
 def _iter_candidate_python_files(layout: CandidateLayout) -> list[Path]:

@@ -1042,6 +1042,7 @@ export default function PluginCcEditorPage() {
   const terminalNotifiedTaskIdsRef = useRef<Set<string>>(new Set())
   const syncedCandidateKeyRef = useRef('')
   const mountedRef = useRef(false)
+  const fileSelectionRunIdRef = useRef(0)
 
   const hasPendingProposal = task?.status === 'waiting_apply'
   const hasRunningTask = Boolean(task && RUNNING_TASK_STATUSES.has(task.status))
@@ -1054,12 +1055,14 @@ export default function PluginCcEditorPage() {
   const canStopTask = Boolean(currentTaskId && (isGenerating || hasRunningTask))
   const canReconnectTaskStream = Boolean(currentTaskId && (isGenerating || hasRunningTask || isTaskStreamFallback))
   const selectedPluginEnabled = pluginInfo
-    ? pluginInfo.enabled
+    ? pluginInfo.loadFailed
+      ? true
+      : pluginInfo.enabled
     : isDisabledPluginEntry(selectedFile)
       ? false
       : null
 
-  const loadFiles = async () => {
+  const loadFiles = async (serverActiveTaskId: string | null = null) => {
     try {
       const pluginFiles = await pluginEditorApi.getPluginFiles()
       setFiles(pluginFiles)
@@ -1073,8 +1076,10 @@ export default function PluginCcEditorPage() {
         setOriginalCode(diskContent)
         setPrompt(draft.prompt || '')
         setGeneratedCode(canRestoreCode ? draft.generatedCode || '' : '')
-        setActiveTaskId(draft.taskId || '')
-        restoredTaskIdRef.current = draft.taskId || null
+        if (!serverActiveTaskId) {
+          setActiveTaskId(draft.taskId || '')
+          restoredTaskIdRef.current = draft.taskId || null
+        }
         return
       }
       if (!selectedFile && pluginFiles[0]) {
@@ -1089,7 +1094,7 @@ export default function PluginCcEditorPage() {
     }
   }
 
-  const loadStatus = async () => {
+  const loadStatus = async (): Promise<string | null> => {
     try {
       const [nextStatus, presets] = await Promise.all([pluginDevApi.getStatus(), ccModelPresetApi.getList()])
       setStatus(nextStatus)
@@ -1100,22 +1105,25 @@ export default function PluginCcEditorPage() {
           presets[0] ??
           null
       )
-      if (nextStatus.active_task_id && pollingTaskIdRef.current !== nextStatus.active_task_id) {
-        setActiveTaskId(nextStatus.active_task_id)
-        restoredTaskIdRef.current = null
-        startTaskStream(nextStatus.active_task_id)
-      }
+      return nextStatus.active_task_id
     } catch (error) {
       setStatus(null)
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.pluginDev.statusLoadFailed')}: ${message}`)
+      return null
     }
   }
 
   useEffect(() => {
     mountedRef.current = true
-    loadFiles()
-    loadStatus()
+    void (async () => {
+      const serverActiveTaskId = await loadStatus()
+      await loadFiles(serverActiveTaskId)
+      if (!mountedRef.current || !serverActiveTaskId) return
+      setActiveTaskId(serverActiveTaskId)
+      restoredTaskIdRef.current = null
+      startTaskStream(serverActiveTaskId)
+    })()
     return () => {
       mountedRef.current = false
       taskStreamCleanupRef.current?.()
@@ -1148,12 +1156,18 @@ export default function PluginCcEditorPage() {
 
   const handleFileSelect = async (event: SelectChangeEvent<string>) => {
     const file = event.target.value
-    stopTaskStream()
-    stopTaskPolling()
-    restoredTaskIdRef.current = null
-    syncedCandidateKeyRef.current = ''
+    if (file === selectedFile) return
+    if (hasLocalChanges && !window.confirm(t('editor.dialogs.unsavedSwitchMessage'))) return
+
+    const runId = fileSelectionRunIdRef.current + 1
+    fileSelectionRunIdRef.current = runId
     try {
       const content = await pluginEditorApi.getPluginFileContent(file)
+      if (!mountedRef.current || fileSelectionRunIdRef.current !== runId) return
+      stopTaskStream()
+      stopTaskPolling()
+      restoredTaskIdRef.current = null
+      syncedCandidateKeyRef.current = ''
       setSelectedFile(file)
       setCode(content)
       setOriginalCode(content)
@@ -1161,6 +1175,7 @@ export default function PluginCcEditorPage() {
       setTask(null)
       setActiveTaskId('')
     } catch (error) {
+      if (!mountedRef.current || fileSelectionRunIdRef.current !== runId) return
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.messages.loadContentFailed')}: ${message}`)
     }
@@ -1252,6 +1267,38 @@ export default function PluginCcEditorPage() {
     return completed
   }
 
+  const reconcileTaskAfterProposalConflict = async (taskId: string): Promise<boolean> => {
+    try {
+      const nextTask = await pluginDevApi.getTask(taskId)
+      applyTaskSnapshot(nextTask)
+      if (nextTask.status === 'waiting_apply' || RUNNING_TASK_STATUSES.has(nextTask.status)) return false
+      stopTaskStream()
+      stopTaskPolling()
+      setActiveTaskId('')
+      setIsGenerating(false)
+      if (nextTask.status === 'applied') {
+        try {
+          const pluginFiles = await pluginEditorApi.getPluginFiles()
+          const nextFile = pluginFiles.includes(nextTask.file_path) ? nextTask.file_path : pluginFiles[0] || ''
+          const content = nextFile ? await pluginEditorApi.getPluginFileContent(nextFile) : ''
+          setFiles(pluginFiles)
+          setSelectedFile(nextFile)
+          setCode(content)
+          setOriginalCode(content)
+          setGeneratedCode(content)
+          if (historyOpen) await loadHistoryForFile(nextTask.file_path)
+        } catch (refreshError) {
+          const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+          notification.warning(`${t('editor.messages.applyRefreshFailed')}: ${message}`)
+        }
+      }
+      notification.info(t('editor.messages.proposalStateReconciled'))
+      return true
+    } catch {
+      return false
+    }
+  }
+
   const startTaskStream = (taskId: string) => {
     stopTaskStream()
     pollingTaskIdRef.current = taskId
@@ -1334,26 +1381,39 @@ export default function PluginCcEditorPage() {
     setIsRollingBack(true)
     try {
       const response = await pluginDevApi.rollback(historyFile, versionId, target)
-      const [content, pluginFiles] = await Promise.all([
-        pluginEditorApi.getPluginFileContent(historyFile),
-        pluginEditorApi.getPluginFiles(),
-      ])
       stopTaskStream()
       stopTaskPolling()
       restoredTaskIdRef.current = null
       syncedCandidateKeyRef.current = ''
-      setFiles(pluginFiles)
-      setSelectedFile(historyFile)
-      setCode(content || '')
-      setOriginalCode(content || '')
       setTask(null)
       setActiveTaskId('')
       setGeneratedCode('')
-      await loadHistoryForFile(historyFile)
-      notification.success(t('editor.messages.pluginDevRollbackSuccess', { version: response.version_id }))
+      try {
+        const pluginFiles = await pluginEditorApi.getPluginFiles()
+        const historyFileExists = pluginFiles.includes(historyFile)
+        const nextSelectedFile = historyFileExists ? historyFile : pluginFiles[0] || ''
+        const content = nextSelectedFile
+          ? await pluginEditorApi.getPluginFileContent(nextSelectedFile)
+          : ''
+        setFiles(pluginFiles)
+        setSelectedFile(nextSelectedFile)
+        setCode(content || '')
+        setOriginalCode(content || '')
+        await loadHistoryForFile(historyFile)
+        notification.success(t(
+          historyFileExists
+            ? 'editor.messages.pluginDevRollbackSuccess'
+            : 'editor.messages.pluginDevRollbackDeletedSuccess',
+          { version: response.version_id }
+        ))
+      } catch (refreshError) {
+        notification.success(t('editor.messages.pluginDevRollbackSuccess', { version: response.version_id }))
+        const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+        notification.warning(`${t('editor.messages.rollbackRefreshFailed')}: ${message}`)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
-      notification.error(`${t('editor.messages.applyFailed')}: ${message}`)
+      notification.error(`${t('editor.messages.rollbackFailed')}: ${message}`)
     } finally {
       setIsRollingBack(false)
     }
@@ -1519,6 +1579,7 @@ export default function PluginCcEditorPage() {
       setActiveTaskId('')
       notification.info(t('editor.messages.pluginDevTaskStopped'))
     } catch (error) {
+      if (mountedRef.current) startTaskStream(taskId)
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.messages.pluginDevTaskStopFailed')}: ${message}`)
     }
@@ -1546,6 +1607,8 @@ export default function PluginCcEditorPage() {
         await pluginDevApi.discardProposal(currentTask.proposal_id)
       }
     } catch (error) {
+      if (taskId && await reconcileTaskAfterProposalConflict(taskId)) return
+      if (mountedRef.current) startTaskStream(taskId)
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.messages.clearProposalFailed')}: ${message}`)
       return
@@ -1567,6 +1630,7 @@ export default function PluginCcEditorPage() {
 
     const proposalId = task.proposal_id
     const proposalFile = task.file_path
+    const taskId = task.task_id
 
     setIsApplyingProposal(true)
     try {
@@ -1594,6 +1658,7 @@ export default function PluginCcEditorPage() {
         notification.warning(`${t('editor.messages.applyRefreshFailed')}: ${message}`)
       }
     } catch (error) {
+      if (taskId && await reconcileTaskAfterProposalConflict(taskId)) return
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.messages.applyFailed')}: ${message}`)
     } finally {
@@ -1611,10 +1676,14 @@ export default function PluginCcEditorPage() {
         notification.error(result.errorMsg || t('editor.messages.reloadFailed'))
         return
       }
-      const pluginFiles = await pluginEditorApi.getPluginFiles()
-      setFiles(pluginFiles)
       setPluginInfoTick(tick => tick + 1)
       notification.success(t('editor.messages.reloadSuccess', { name: moduleName }))
+      try {
+        setFiles(await pluginEditorApi.getPluginFiles())
+      } catch (refreshError) {
+        const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+        notification.warning(`${t('editor.messages.reloadRefreshFailed')}: ${message}`)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.messages.reloadFailed')}: ${message}`)
@@ -1681,12 +1750,18 @@ export default function PluginCcEditorPage() {
     setIsFileOpBusy(true)
     try {
       await pluginEditorApi.deletePluginFile(selectedFile)
-      const pluginFiles = await pluginEditorApi.getPluginFiles()
-      setFiles(pluginFiles)
+      const deletedFile = selectedFile
+      setFiles(current => current.filter(file => file !== deletedFile))
       setSelectedFile('')
       setCode('')
       setOriginalCode('')
       notification.success(t('editor.messages.deleteSuccess'))
+      try {
+        setFiles(await pluginEditorApi.getPluginFiles())
+      } catch (refreshError) {
+        const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+        notification.warning(`${t('editor.messages.deleteRefreshFailed')}: ${message}`)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
       notification.error(`${t('editor.messages.deleteFailed')}: ${message}`)

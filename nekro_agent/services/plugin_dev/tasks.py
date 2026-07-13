@@ -33,6 +33,7 @@ from nekro_agent.services.plugin_dev.self_check import (
 )
 from nekro_agent.services.plugin_dev.versioning import (
     get_version_info,
+    prune_version_history,
     record_version,
     remove_version_record,
     rollback,
@@ -82,7 +83,12 @@ def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def _task_path(task_id: str) -> Path:
@@ -1111,6 +1117,12 @@ async def _apply_proposal_unlocked(proposal_id: str) -> str:
 
     version_ids: dict[str, str] = {}
     applied_entries: list[PluginDevProposalFile] = []
+    proposal_path = _proposal_path(proposal_id)
+    task_path = _task_path(proposal.task_id)
+    original_proposal_data = _read_json(proposal_path, {})
+    original_task_data = _read_json(task_path, {})
+    proposal_metadata_written = False
+    task_metadata_written = False
     try:
         for entry in entries:
             if entry.action == "delete":
@@ -1128,8 +1140,38 @@ async def _apply_proposal_unlocked(proposal_id: str) -> str:
                 before_exists=before_exists[entry.file_path],
                 after_exists=entry.action != "delete",
                 summary=proposal.summary,
+                prune=False,
             )
+
+        proposal_data = proposal.model_dump()
+        proposal_data["status"] = "applied"
+        _write_json(proposal_path, proposal_data)
+        proposal_metadata_written = True
+
+        task_data = dict(original_task_data)
+        task_data["status"] = "applied"
+        logs = list(task_data.get("logs") or [])
+        if len(entries) > 1:
+            logs.append(
+                f"已应用提案（共 {len(entries)} 个文件），主文件版本号："
+                f"{version_ids.get(primary_entry.file_path) or next(iter(version_ids.values()))}"
+            )
+        else:
+            logs.append(f"已应用提案，版本号：{next(iter(version_ids.values()))}")
+        task_data["logs"] = logs
+        _save_task(proposal.task_id, task_data)
+        task_metadata_written = True
     except Exception:
+        if task_metadata_written:
+            try:
+                _write_json(task_path, original_task_data)
+            except Exception as restore_error:
+                logger.error(f"恢复插件开发任务元数据失败: {proposal.task_id}: {restore_error}")
+        if proposal_metadata_written:
+            try:
+                _write_json(proposal_path, original_proposal_data)
+            except Exception as restore_error:
+                logger.error(f"恢复插件开发提案元数据失败: {proposal_id}: {restore_error}")
         for entry in reversed(applied_entries):
             try:
                 before_content = before_map[entry.file_path]
@@ -1146,21 +1188,12 @@ async def _apply_proposal_unlocked(proposal_id: str) -> str:
                 logger.error(f"回滚插件版本记录失败: {recorded_file_path} {recorded_version_id}: {cleanup_error}")
         raise
     version_id = version_ids.get(primary_entry.file_path) or next(iter(version_ids.values()))
-
-    proposal_data = proposal.model_dump()
-    proposal_data["status"] = "applied"
-    _write_json(_proposal_path(proposal_id), proposal_data)
-
-    task_path = _task_path(proposal.task_id)
-    if task_path.exists():
-        task_data = _read_json(task_path, {})
-        task_data["status"] = "applied"
-        logs = task_data.setdefault("logs", [])
-        if len(entries) > 1:
-            logs.append(f"已应用提案（共 {len(entries)} 个文件），主文件版本号：{version_id}")
-        else:
-            logs.append(f"已应用提案，版本号：{version_id}")
-        _save_task(proposal.task_id, task_data)
+    for file_path in version_ids:
+        try:
+            prune_version_history(file_path)
+        except Exception as prune_error:
+            # 裁剪仅回收超限旧快照；失败时保留额外历史，不反向破坏已提交的应用事务。
+            logger.warning(f"裁剪插件版本历史失败: {file_path}: {prune_error}")
     return version_id
 
 

@@ -9,6 +9,7 @@ import shutil
 import stat
 import sys
 import traceback
+import uuid
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
@@ -146,26 +147,27 @@ class PluginCollector:
         if str(self.packages_dir.parent.absolute()) not in sys.path:
             sys.path.insert(0, str(self.packages_dir.parent.absolute()))
 
-        # 加载内置插件
-        for item in self.builtin_plugin_dir.iterdir():
-            try:
-                await self._try_load_plugin(item, is_builtin=True)
-            except Exception as e:
-                logger.exception(f"加载内置插件失败: {item}: {e}")
-
-        # 加载本地插件
-        for item in self.workdir_plugin_dir.iterdir():
-            try:
-                await self._try_load_plugin(item, is_builtin=False)
-            except Exception as e:
-                logger.exception(f"加载本地插件失败: {item}: {e}")
-
-        # 加载云端插件
-        for item in self.packages_dir.iterdir():
-            try:
-                await self._try_load_plugin(item, is_package=True)
-            except Exception as e:
-                logger.exception(f"加载云端插件失败: {item}: {e}")
+        loaded_module_names: Set[str] = set()
+        plugin_sources = (
+            (self.builtin_plugin_dir, True, False),
+            (self.workdir_plugin_dir, False, False),
+            (self.packages_dir, False, True),
+        )
+        for source_dir, is_builtin, is_package in plugin_sources:
+            for item in sorted(source_dir.iterdir(), key=lambda path: path.name):
+                module_name = self._get_loadable_entry_module_name(item)
+                if module_name is None:
+                    continue
+                if module_name in loaded_module_names:
+                    logger.warning(
+                        f"跳过低优先级的重复插件 `{item}`，插件来源优先级为：内置插件 > 工作目录插件 > 云端插件",
+                    )
+                    continue
+                loaded_module_names.add(module_name)
+                try:
+                    await self._try_load_plugin(item, is_builtin=is_builtin, is_package=is_package)
+                except Exception as e:
+                    logger.exception(f"加载插件失败: {item}: {e}")
 
     @staticmethod
     def normalize_plugin_module_name(module_name: str) -> str:
@@ -266,6 +268,15 @@ class PluginCollector:
             return (path / "__init__.py").exists()
         return path.with_suffix(".py").exists()
 
+    @staticmethod
+    def _get_loadable_entry_module_name(path: Path) -> Optional[str]:
+        """返回可加载顶层条目的模块名，非插件条目返回 ``None``。"""
+        if path.is_dir():
+            return path.name if (path / "__init__.py").is_file() else None
+        if path.is_file() and path.suffix == ".py" and path.name != "__init__.py":
+            return path.stem
+        return None
+
     def _to_load_path(self, path: Path) -> Path:
         """转换为加载路径"""
         if path.is_dir():
@@ -277,7 +288,7 @@ class PluginCollector:
         module_name: str,
         is_builtin: Optional[bool] = None,
         is_package: Optional[bool] = None,
-    ) -> None:
+    ) -> bool:
         """重新加载指定插件
 
         module_name 兼容文件路径形态（如 `demo.py`、`mypkg/plugin.py`、
@@ -342,11 +353,13 @@ class PluginCollector:
         self._purge_module_tree(module_path)
 
         # logger.debug(f"尝试加载插件: {real_path} 从 {fixed_module_name}")
-        await self._try_load_plugin(
+        loaded = await self._try_load_plugin(
             real_path,
             is_builtin=source_is_builtin,
             is_package=source_is_package,
         )
+        if not loaded:
+            return False
 
         # 重载完成后，如果插件有路由，进行热重载
         try:
@@ -356,10 +369,15 @@ class PluginCollector:
                     plugin_router_manager,
                 )
 
-                if plugin_router_manager.reload_plugin_router(reloaded_plugin):
-                    logger.info(f"插件 {reloaded_plugin.name} 路由热重载成功")
+                if not plugin_router_manager.reload_plugin_router(reloaded_plugin):
+                    await self.unload_plugin_by_module_name(fixed_module_name)
+                    return False
+                logger.info(f"插件 {reloaded_plugin.name} 路由热重载成功")
         except Exception as router_error:
             logger.exception(f"插件路由热重载失败: {router_error}")
+            await self.unload_plugin_by_module_name(fixed_module_name)
+            return False
+        return True
 
     async def clone_package(
         self,
@@ -389,8 +407,8 @@ class PluginCollector:
         self.package_data.add_package(
             PackageInfo(module_name=module_name, git_url=git_url, remote_id=remote_id),
         )
-        if auto_load:
-            await self.reload_plugin_by_module_name(module_name)
+        if auto_load and not await self.reload_plugin_by_module_name(module_name):
+            raise RuntimeError(f"云端插件 `{module_name}` 已下载，但加载失败")
 
     async def update_package(self, module_name: str, auto_reload: bool = False) -> None:
         """更新云端插件
@@ -414,8 +432,8 @@ class PluginCollector:
             logger.error(f"更新云端插件 `{module_name}` 失败: {e}")
             raise
 
-        if auto_reload:
-            await self.reload_plugin_by_module_name(module_name, is_package=True)
+        if auto_reload and not await self.reload_plugin_by_module_name(module_name, is_package=True):
+            raise RuntimeError(f"云端插件 `{module_name}` 已更新，但重载失败")
 
     async def remove_package(self, module_name: str, clear_config: bool = False) -> None:
         """删除云端插件
@@ -430,11 +448,29 @@ class PluginCollector:
 
         # 获取插件实例以便删除配置文件
         plugin = self.get_plugin_by_module_name(module_name)
+        was_loaded_package = plugin is not None and plugin.is_package
+        backup_root = self.packages_dir.parent / ".plugin-delete-backups"
+        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_dir = backup_root / f"{module_name}-{uuid.uuid4().hex}"
 
         # 先卸载插件，从插件收集器中移除，限制只卸载云端插件
         await self.unload_plugin_by_module_name(module_name, scope="package")
 
-        # 删除插件配置文件和数据目录
+        try:
+            package_dir.replace(backup_dir)
+            self.package_data.remove_package(module_name)
+        except Exception as e:
+            logger.error(f"移出云端插件目录失败: {package_dir}: {e}")
+            if backup_dir.exists() and not package_dir.exists():
+                try:
+                    backup_dir.replace(package_dir)
+                except Exception as restore_error:
+                    raise RuntimeError(f"删除云端插件 `{module_name}` 失败，且恢复插件目录失败") from restore_error
+            if was_loaded_package and not await self.reload_plugin_by_module_name(module_name, is_package=True):
+                raise RuntimeError(f"删除云端插件 `{module_name}` 失败，且恢复插件运行状态失败") from e
+            raise
+
+        # 文件与包信息提交删除后再清理数据；清理失败不反向破坏已完成的删除事务。
         if clear_config and plugin:
             plugin_data_dir = plugin._plugin_path  # noqa: SLF001
             if plugin_data_dir.exists():
@@ -444,13 +480,10 @@ class PluginCollector:
                 except Exception as e:
                     logger.warning(f"删除插件 {plugin.name} 配置文件时发生错误: {e}")
 
-        # 然后删除文件和包信息
         try:
-            shutil.rmtree(package_dir, onerror=_remove_readonly)
+            shutil.rmtree(backup_dir, onerror=_remove_readonly)
         except Exception as e:
-            logger.error(f"删除云端插件目录失败: {package_dir}: {e}")
-            raise
-        self.package_data.remove_package(module_name)
+            logger.warning(f"云端插件已删除，但清理备份目录失败: {backup_dir}: {e}")
 
     async def _try_load_plugin(self, item_path: Path, is_builtin: bool = False, is_package: bool = False) -> bool:
         """尝试加载插件
@@ -465,18 +498,15 @@ class PluginCollector:
         # 如果是Python文件
         if item_path.is_file() and item_path.suffix == ".py" and item_path.name != "__init__.py":
             module_path = f"{item_path.parent.name}.{item_path.stem}"
-            await self._load_plugin_module(module_path, item_path, is_builtin, is_package)
-            return True
+            return await self._load_plugin_module(module_path, item_path, is_builtin, is_package)
         # 如果是目录且包含 __init__.py（Python包）
         if item_path.is_dir() and (item_path / "__init__.py").exists():
             module_path = f"{item_path.parent.name}.{item_path.name}"
-            await self._load_plugin_module(module_path, item_path, is_builtin, is_package)
-            return True
+            return await self._load_plugin_module(module_path, item_path, is_builtin, is_package)
         # 如果目录已经是完整的 __init__.py 文件
         if item_path.is_file() and item_path.suffix == ".py" and item_path.name == "__init__.py":
             module_path = f"{item_path.parent.parent.name}.{item_path.parent.name}"
-            await self._load_plugin_module(module_path, item_path, is_builtin, is_package)
-            return True
+            return await self._load_plugin_module(module_path, item_path, is_builtin, is_package)
         return False
 
     async def _load_plugin_module(
@@ -485,7 +515,7 @@ class PluginCollector:
         path: Path,
         is_builtin: bool = False,
         is_package: bool = False,
-    ) -> None:
+    ) -> bool:
         """加载插件模块
 
         Args:
@@ -519,7 +549,7 @@ class PluginCollector:
                     stack_trace=traceback.format_exc(),
                 ),
             )
-            return
+            return False
 
         if not hasattr(module, "plugin"):
             self._purge_module_tree(module_path)
@@ -539,25 +569,32 @@ class PluginCollector:
                     stack_trace="".join(traceback.format_stack()),
                 ),
             )
-            return
+            return False
 
         plugin: NekroPlugin = module.plugin
         plugin._set_module(module)  # noqa: SLF001
 
-        if plugin.key in self.loaded_plugins:
-            # 检查重复插件
-            loaded_plugin = self.loaded_plugins[plugin.key]
-            if loaded_plugin.cleanup_method:
-                await loaded_plugin.cleanup_method()
-                logger.info(f"插件 {loaded_plugin.name} 清理完成")
-            # 卸载旧插件模块（含包内子模块），保证后续重新 import 执行最新代码
-            self._pop_stale_plugin_modules(module_path)
+        loaded_plugin = self.loaded_plugins.get(plugin.key)
+        if loaded_plugin is not None:
+            old_priority = 0 if loaded_plugin.is_builtin else 2 if loaded_plugin.is_package else 1
+            new_priority = 0 if is_builtin else 2 if is_package else 1
+            if old_priority <= new_priority:
+                logger.warning(
+                    f"跳过重复插件 `{module_path}`：插件 key `{plugin.key}` 已由更高或相同优先级来源占用",
+                )
+                self._purge_module_tree(module_path)
+                return False
 
         if isinstance(plugin, NekroPlugin):
             # 直接设置内置插件标识
             try:
                 if plugin.init_method:
                     await plugin.init_method()
+                plugin._update_plugin_type(is_builtin, is_package)  # noqa: SLF001
+                if plugin.key not in config.PLUGIN_ENABLED:
+                    plugin._is_enabled = False  # noqa: SLF001
+                else:
+                    await plugin.trigger_callbacks("enabled")
             except Exception as e:
                 self._purge_module_tree(module_path)
                 error_msg = f'插件 "{plugin.name}" 初始化失败 {path}: {e}'
@@ -578,18 +615,24 @@ class PluginCollector:
                         stack_trace=traceback.format_exc(),
                     ),
                 )
-                return
+                return False
+
+            if loaded_plugin is not None:
+                if loaded_plugin.cleanup_method:
+                    await loaded_plugin.cleanup_method()
+                    logger.info(f"插件 {loaded_plugin.name} 清理完成")
+                if loaded_plugin._commands:  # noqa: SLF001
+                    from nekro_agent.services.command.registry import command_registry
+
+                    command_registry.unregister_plugin_commands(loaded_plugin.key)
+                self.loaded_plugins.pop(loaded_plugin.key, None)
+                old_module_path = loaded_plugin._module.__name__  # noqa: SLF001
+                if old_module_path != module_path:
+                    self._purge_module_tree(old_module_path)
 
             logger.success(
                 f'插件加载成功: "{plugin.name}" by "{plugin.author or "未知"}"{" [内置]" if is_builtin else ""}{" [云端]" if is_package else ""}',
             )
-            plugin._update_plugin_type(is_builtin, is_package)  # noqa: SLF001
-            if plugin.key not in config.PLUGIN_ENABLED:
-                # 直接设置状态为禁用，不触发回调（因为插件刚加载，没有从启用变为禁用）
-                plugin._is_enabled = False  # noqa: SLF001
-            else:
-                # 插件已启用，触发 enabled 回调
-                await plugin.trigger_callbacks("enabled")
             self.loaded_plugins[plugin.key] = plugin
             self.loaded_module_names.add(module_path)
 
@@ -603,6 +646,7 @@ class PluginCollector:
 
             # 如果之前记录了失败信息，现在加载成功了，删除失败记录
             self._remove_failed_plugin(module_path)
+            return True
         else:
             self._purge_module_tree(module_path)
             error_msg = f"插件实例类型错误: {path}"
@@ -634,6 +678,7 @@ class PluginCollector:
                     stack_trace="".join(traceback.format_stack()),
                 ),
             )
+            return False
 
     def _add_failed_plugin(self, module_path: str, failed_plugin_info: FailedPluginInfo) -> None:
         """添加失败的插件信息

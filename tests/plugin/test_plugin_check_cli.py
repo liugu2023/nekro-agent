@@ -208,6 +208,45 @@ def test_plugin_check_cli_disabled_file_success(tmp_path: Path):
     assert any(".py 文件名暂存" in warning for warning in report["warnings"])
 
 
+def test_plugin_check_cli_disabled_package_entry_success(tmp_path: Path):
+    package_dir = tmp_path / "disabled_package"
+    package_dir.mkdir()
+    disabled_entry = package_dir / "__init__.py.disabled"
+    disabled_entry.write_text("from .plugin import plugin\n", encoding="utf-8")
+    (package_dir / "plugin.py").write_text(
+        "\n".join(
+            [
+                "from nekro_agent.api.plugin import NekroPlugin",
+                "",
+                "plugin = NekroPlugin(",
+                '    name="DisabledPackage",',
+                '    module_name="disabled_package",',
+                '    description="disabled package demo",',
+                '    version="0.1.0",',
+                '    author="Tester",',
+                '    url="https://example.com",',
+                ")",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(CLI_PATH), "plugin", "check", str(disabled_entry), "--json"],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    report = json.loads(completed.stdout)
+    assert report["ok"] is True
+    assert report["stage_mode"] == "package"
+    assert report["plugin"]["module_name"] == "disabled_package"
+
+
 def test_plugin_check_cli_strict_reports_async_contract_issue(tmp_path: Path):
     plugin_file = tmp_path / "sync_method_plugin.py"
     plugin_file.write_text(

@@ -16,7 +16,8 @@ export function isDisabledPluginEntry(filePath: string): boolean {
  * 在已加载插件列表中查找文件对应的插件。
  *
  * 按声明模块名与插件 key（author.moduleName）尾段宽容匹配；文件未被加载为
- * 插件（如 .py.disabled 文件、加载失败、目录缺少 __init__.py）时返回 null。
+ * 插件（如 .py.disabled 文件、目录缺少 __init__.py）时返回 null。
+ * 加载失败的插件仍需返回，以便编辑器为其提供文件级禁用入口。
  */
 export function findPluginByFile(plugins: Plugin[], filePath: string): Plugin | null {
   const topModule = topModuleNameOf(filePath)
@@ -24,10 +25,9 @@ export function findPluginByFile(plugins: Plugin[], filePath: string): Plugin | 
   return (
     plugins.find(
       plugin =>
-        !plugin.loadFailed &&
-        (plugin.moduleName === topModule ||
+        plugin.moduleName === topModule ||
           plugin.id === topModule ||
-          plugin.id.endsWith(`.${topModule}`))
+          plugin.id.endsWith(`.${topModule}`)
     ) ?? null
   )
 }

@@ -7,9 +7,10 @@
 
 import inspect
 from functools import wraps
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
+from starlette.routing import BaseRoute
 
 from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.services.plugin.base import NekroPlugin
@@ -50,6 +51,7 @@ class PluginRouterManager:
         self._app: Optional[FastAPI] = None
         self._mounted_plugins: Set[str] = set()  # 已挂载路由的插件键
         self._plugin_routers: Dict[str, APIRouter] = {}  # 插件路由缓存
+        self._mounted_routes: Dict[str, List[BaseRoute]] = {}  # include_router 复制到主应用的实际路由
 
     def set_app(self, app: FastAPI) -> None:
         """设置FastAPI应用实例"""
@@ -77,40 +79,50 @@ class PluginRouterManager:
 
         plugin_router = plugin.get_plugin_router()
         if not plugin_router:
-            return False
+            return True
 
+        existing_route_ids: Optional[Set[int]] = None
         try:
             # 如果已经挂载，先卸载
             if plugin.key in self._mounted_plugins:
-                self.unmount_plugin_router(plugin.key)
+                if not self.unmount_plugin_router(plugin.key):
+                    return False
 
             mount_path = f"/plugins/{plugin.key}"
             self._add_plugin_middleware(plugin_router, plugin.key, plugin.name)
+            existing_route_ids = {id(route) for route in self._app.router.routes}
             self._app.include_router(plugin_router, prefix=mount_path, tags=[f"Plugin:{plugin.name}"])
+            mounted_routes = [route for route in self._app.router.routes if id(route) not in existing_route_ids]
 
             # 记录挂载状态
             self._mounted_plugins.add(plugin.key)
             self._plugin_routers[plugin.key] = plugin_router
+            self._mounted_routes[plugin.key] = mounted_routes
 
             logger.info(f"✅ 插件 {plugin.name} 的路由已动态挂载到 {mount_path}")
 
             self._update_openapi_schema()
 
         except Exception as e:
+            if existing_route_ids is not None:
+                self._app.router.routes[:] = [
+                    route for route in self._app.router.routes if id(route) in existing_route_ids
+                ]
+                self._update_openapi_schema()
             logger.exception(f"❌ 挂载插件 {plugin.name} 的路由失败: {e}")
             return False
         else:
             return True
 
-    def _add_plugin_middleware(self, router, plugin_key: str, plugin_name: str) -> None:
+    def _add_plugin_middleware(self, router: APIRouter, plugin_key: str, plugin_name: str) -> None:
         """为插件路由添加中间件，用于检查插件是否启用"""
         for route in router.routes:
             if hasattr(route, "endpoint") and callable(route.endpoint):
                 # 保存原始的端点函数
-                original_endpoint = route.endpoint
+                original_endpoint = getattr(route.endpoint, "__nekro_original_endpoint__", route.endpoint)
 
                 # 使用闭包创建新的端点函数，包含中间件逻辑
-                def create_wrapped_endpoint(orig_func, key, _name):
+                def create_wrapped_endpoint(orig_func: Any, key: str, _name: str):
 
                     # 保持原始函数的签名
                     @wraps(orig_func)
@@ -129,6 +141,7 @@ class PluginRouterManager:
                             return await orig_func(*args, **kwargs)
                         return orig_func(*args, **kwargs)
 
+                    setattr(wrapped_endpoint, "__nekro_original_endpoint__", orig_func)
                     return wrapped_endpoint
 
                 # 替换路由的端点函数
@@ -151,19 +164,21 @@ class PluginRouterManager:
             logger.error("❌ FastAPI应用实例未设置，无法卸载插件路由")
             return False
 
-        if plugin_key not in self._mounted_plugins:
+        if plugin_key not in self._mounted_plugins and plugin_key not in self._mounted_routes:
             return True
 
         try:
-            logger.warning(f"⚠️  插件 {plugin_key} 的路由无法动态卸载")
-            logger.warning("由于 FastAPI 的设计限制，通过 include_router 添加的路由无法在运行时移除")
-            logger.warning("建议重启应用以完全移除插件路由")
+            mounted_routes = self._mounted_routes.pop(plugin_key, [])
+            mounted_route_ids = {id(route) for route in mounted_routes}
+            self._app.router.routes[:] = [
+                route for route in self._app.router.routes if id(route) not in mounted_route_ids
+            ]
 
-            # 更新状态（标记为未挂载，即使实际路由还在）
             self._mounted_plugins.discard(plugin_key)
             self._plugin_routers.pop(plugin_key, None)
 
-            logger.info(f"⚠️  插件 {plugin_key} 标记为已卸载（但路由可能仍然存在）")
+            logger.info(f"插件 {plugin_key} 的 {len(mounted_routes)} 条路由已卸载")
+            self._update_openapi_schema()
 
         except Exception as e:
             logger.exception(f"❌ 卸载插件 {plugin_key} 的路由失败: {e}")
@@ -185,19 +200,14 @@ class PluginRouterManager:
     def reload_plugin_router(self, plugin: NekroPlugin) -> bool:
         """重载插件路由
 
-        ⚠️ 由于 include_router 的限制，重载可能导致路由重复。
-        建议重启应用以完全重载插件路由。
-
         Args:
             plugin: 插件实例
 
         Returns:
             bool: 是否成功重载
         """
-        logger.warning("⚠️  插件路由重载可能导致路由重复，建议重启应用")
-
-        # 先标记卸载（但实际路由可能还在）
-        self.unmount_plugin_router(plugin.key)
+        if not self.unmount_plugin_router(plugin.key):
+            return False
 
         # 清除插件的路由缓存
         plugin._router = None  # noqa: SLF001
@@ -215,15 +225,11 @@ class PluginRouterManager:
 
     def refresh_all_plugin_routes(self) -> None:
         """刷新所有插件路由
-
-        ⚠️ 由于 include_router 的限制，刷新可能导致路由重复。
-        建议重启应用以完全刷新插件路由。
         """
         if not self._app:
             logger.error("❌ FastAPI应用实例未设置，无法刷新插件路由")
             return
 
-        logger.warning("⚠️  插件路由刷新可能导致路由重复，建议重启应用")
         logger.info("🔄 开始刷新所有插件路由...")
 
         # 导入插件收集器
@@ -232,7 +238,7 @@ class PluginRouterManager:
         # 获取所有有路由的插件
         plugins_with_router = plugin_collector.get_plugins_with_router()
 
-        # 标记卸载所有已挂载的插件路由（但实际路由可能还在）
+        # 卸载所有已挂载的插件路由
         for plugin_key in list(self._mounted_plugins):
             self.unmount_plugin_router(plugin_key)
 

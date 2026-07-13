@@ -267,8 +267,6 @@ async def download_plugin(
         auto_load=True,
     )
 
-    await plugin_collector.reload_plugin_by_module_name(plugin_data.moduleName, is_package=True)
-
     return ActionResponse(ok=True)
 
 

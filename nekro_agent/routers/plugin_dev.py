@@ -36,7 +36,6 @@ from nekro_agent.services.plugin_dev.host_file_gateway import (
     normalize_plugin_file_path,
     plugin_top_dir,
     read_plugin_file,
-    resolve_plugin_file,
     sha256_text,
 )
 from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
@@ -284,7 +283,8 @@ async def stop_plugin_dev_sandbox(
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevStatusResponse:
     workspace = await PluginDevSandboxService.stop()
-    return _build_status_response("running" if workspace.status == "active" else "stopped")
+    status = "running" if workspace.status == "active" else workspace.status
+    return _build_status_response(status)
 
 
 @router.put("/cc-model-preset", summary="设置插件开发沙盒 CC 模型组", response_model=PluginDevStatusResponse)
@@ -425,8 +425,8 @@ async def get_plugin_dev_history(
     file_path: str = PathParam(...),
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevHistoryResponse:
-    resolve_plugin_file(file_path)
-    return get_history(file_path)
+    normalized_path = normalize_plugin_file_path(file_path)
+    return get_history(normalized_path)
 
 
 @router.post("/rollback/{file_path:path}", summary="回退插件文件", response_model=PluginDevRollbackResponse)
@@ -436,6 +436,6 @@ async def rollback_plugin_dev_file(
     file_path: str = PathParam(...),
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> PluginDevRollbackResponse:
-    resolve_plugin_file(file_path)
-    version_id = await rollback_plugin_file(file_path, body.version_id, body.target)
+    normalized_path = normalize_plugin_file_path(file_path)
+    version_id = await rollback_plugin_file(normalized_path, body.version_id, body.target)
     return PluginDevRollbackResponse(version_id=version_id)

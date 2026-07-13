@@ -178,7 +178,9 @@ export default function PluginsEditorPage() {
   const notification = useNotification()
   const { t } = useTranslation('plugins')
   const selectedPluginEnabled = pluginInfo
-    ? pluginInfo.enabled
+    ? pluginInfo.loadFailed
+      ? true
+      : pluginInfo.enabled
     : isDisabledPluginEntry(selectedFile)
       ? false
       : null
@@ -461,9 +463,15 @@ export default function PluginsEditorPage() {
       try {
         const content = e.target?.result as string
         await pluginEditorApi.savePluginFile(file.name, content)
-        // 重新加载文件列表
-        const files = await pluginEditorApi.getPluginFiles()
-        setFiles(files)
+        let nextFiles = files.filter(file => file !== fileToDelete)
+        setFiles(nextFiles)
+        try {
+          nextFiles = await pluginEditorApi.getPluginFiles()
+          setFiles(nextFiles)
+        } catch (refreshError) {
+          const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+          notification.warning(`${t('editor.messages.deleteRefreshFailed')}: ${message}`)
+        }
         setSelectedFile(file.name)
         notification.success(t('editor.messages.importSuccess'))
       } catch (err: unknown) {
@@ -540,8 +548,8 @@ export default function PluginsEditorPage() {
           setCode('')
           setOriginalCode('')
 
-          if (files.length > 0) {
-            const newSelectedFile = files[0]
+          if (nextFiles.length > 0) {
+            const newSelectedFile = nextFiles[0]
             setSelectedFile(newSelectedFile)
             prevSelectedFileRef.current = newSelectedFile
 
@@ -601,12 +609,16 @@ export default function PluginsEditorPage() {
       }
 
       // 重新加载文件列表但不自动选择文件
-      const files = await pluginEditorApi.getPluginFiles()
-      setFiles(files)
       setPluginInfoTick(tick => tick + 1)
 
       // 保持当前选中文件不变
       notification.success(t('editor.messages.reloadSuccess', { name: moduleName }))
+      try {
+        setFiles(await pluginEditorApi.getPluginFiles())
+      } catch (refreshError) {
+        const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
+        notification.warning(`${t('editor.messages.reloadRefreshFailed')}: ${message}`)
+      }
       setReloadExtDialogOpen(false)
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : t('editor.messages.unknownError')
@@ -1300,11 +1312,19 @@ export default function PluginsEditorPage() {
                       try {
                         await pluginEditorApi.deletePluginFile(selectedFile)
                         notification.success(t('editor.messages.deleteSuccess'))
-                        // 重新加载文件列表
-                        const files = await pluginEditorApi.getPluginFiles()
-                        setFiles(files)
+                        const deletedFile = selectedFile
+                        setFiles(current => current.filter(file => file !== deletedFile))
                         setSelectedFile('')
                         setCode('')
+                        setOriginalCode('')
+                        try {
+                          setFiles(await pluginEditorApi.getPluginFiles())
+                        } catch (refreshError) {
+                          const message = refreshError instanceof Error
+                            ? refreshError.message
+                            : t('editor.messages.unknownError')
+                          notification.warning(`${t('editor.messages.deleteRefreshFailed')}: ${message}`)
+                        }
                       } catch (err) {
                         notification.error(
                           t('editor.messages.deleteFailed') +

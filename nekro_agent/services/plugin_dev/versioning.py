@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,12 @@ def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
 
 
 def get_version_info() -> PluginDevVersionInfo:
@@ -175,6 +181,7 @@ def record_version(
     before_exists: bool = True,
     after_exists: bool = True,
     summary: str,
+    prune: bool = True,
 ) -> str:
     version = get_version_info()
     version_id = version_id_now()
@@ -205,7 +212,7 @@ def record_version(
         manifest = _read_json(manifest_path, {"file_path": file_path, "current_version_id": None, "versions": []})
         versions = list(manifest.get("versions", []))
         versions.append(item.model_dump())
-        pruned, kept = _partition_versions_for_prune(versions)
+        pruned, kept = _partition_versions_for_prune(versions) if prune else ([], versions)
         manifest["versions"] = kept
         manifest["current_version_id"] = version_id
         _write_json(manifest_path, manifest)
@@ -215,6 +222,19 @@ def record_version(
         raise
     _delete_version_snapshots(history_dir, pruned)
     return version_id
+
+
+def prune_version_history(file_path: str) -> None:
+    """在一组版本记录全部提交后裁剪历史，避免事务失败时丢失旧快照。"""
+    manifest_path = _manifest_path(file_path)
+    manifest = _read_json(manifest_path, {"file_path": file_path, "current_version_id": None, "versions": []})
+    versions = list(manifest.get("versions", []))
+    pruned, kept = _partition_versions_for_prune(versions)
+    if not pruned:
+        return
+    manifest["versions"] = kept
+    _write_json(manifest_path, manifest)
+    _delete_version_snapshots(_history_dir(file_path), pruned)
 
 
 def remove_version_record(file_path: str, version_id: str) -> None:

@@ -203,6 +203,7 @@ async def test_delete_package_file_reload_rules(
 
     async def fake_reload(module_name: str) -> None:
         reloaded.append(module_name)
+        return True
 
     monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(tmp_path))
     monkeypatch.setattr(plugin_editor.plugin_collector, "unload_plugin_by_module_name", fake_unload)
@@ -282,6 +283,7 @@ async def test_toggle_plugin_entry_file(
 
     async def fake_reload(module_name: str) -> None:
         reloaded.append(module_name)
+        return True
 
     monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(tmp_path))
     monkeypatch.setattr(plugin_editor.plugin_collector, "get_plugin_by_module_name", lambda _: SimpleNamespace())
@@ -303,7 +305,7 @@ async def test_delete_restores_loaded_plugin_when_unlink_fails(tmp_path: Path, m
     target_file = tmp_path / "demo.py"
     target_file.write_text("plugin = None\n", encoding="utf-8")
     original_unlink = Path.unlink
-    reload_mock = AsyncMock()
+    reload_mock = AsyncMock(return_value=True)
 
     def fail_target_unlink(path: Path, *args, **kwargs):
         if path == target_file:
@@ -371,7 +373,191 @@ async def test_failed_package_import_purges_partial_modules(tmp_path: Path, monk
 
     monkeypatch.setattr(collector_module, "import_module", fake_import)
 
-    await collector._try_load_plugin(package_dir)
+    loaded = await collector._try_load_plugin(package_dir)
 
+    assert loaded is False
     assert "workdir.broken" not in sys.modules
     assert "workdir.broken.helper" not in sys.modules
+
+
+@pytest.mark.asyncio
+async def test_init_plugins_uses_same_source_priority_as_reload(tmp_path: Path, monkeypatch):
+    collector = _make_collector_with_dirs(tmp_path)
+    builtin_file = collector.builtin_plugin_dir / "duplicate.py"
+    local_file = collector.workdir_plugin_dir / "duplicate.py"
+    package_file = collector.packages_dir / "duplicate.py"
+    for path in (builtin_file, local_file, package_file):
+        path.write_text("plugin = None\n", encoding="utf-8")
+
+    loaded_paths: list[tuple[Path, bool, bool]] = []
+
+    async def fake_try_load(item_path: Path, is_builtin: bool = False, is_package: bool = False) -> bool:
+        loaded_paths.append((item_path, is_builtin, is_package))
+        return True
+
+    monkeypatch.setattr(collector, "_try_load_plugin", fake_try_load)
+
+    await collector.init_plugins()
+
+    assert loaded_paths == [(builtin_file, True, False)]
+
+
+@pytest.mark.asyncio
+async def test_reload_returns_false_when_candidate_load_fails(tmp_path: Path, monkeypatch):
+    collector = _make_collector_with_dirs(tmp_path)
+    plugin_file = collector.workdir_plugin_dir / "broken.py"
+    plugin_file.write_text("plugin = None\n", encoding="utf-8")
+    monkeypatch.setattr(collector, "_try_load_plugin", AsyncMock(return_value=False))
+
+    assert await collector.reload_plugin_by_module_name("broken") is False
+
+
+def test_plugin_router_without_custom_routes_is_reload_success():
+    from fastapi import FastAPI
+
+    from nekro_agent.services.plugin.base import NekroPlugin
+    from nekro_agent.services.plugin.router_manager import PluginRouterManager
+
+    plugin = NekroPlugin(
+        name="No Routes",
+        module_name="no_routes",
+        description="router-less plugin",
+        version="0.1.0",
+        author="Tester",
+        url="https://example.com",
+    )
+    plugin._is_enabled = True  # noqa: SLF001
+    manager = PluginRouterManager()
+    manager.set_app(FastAPI())
+
+    assert manager.reload_plugin_router(plugin) is True
+
+
+@pytest.mark.asyncio
+async def test_duplicate_key_keeps_higher_priority_plugin(tmp_path: Path, monkeypatch):
+    from nekro_agent.services.plugin import collector as collector_module
+    from nekro_agent.services.plugin.base import NekroPlugin
+
+    collector = _make_collector_with_dirs(tmp_path)
+    old_plugin = NekroPlugin(
+        name="Builtin",
+        module_name="builtin_name",
+        description="higher priority",
+        version="0.1.0",
+        author="Tester",
+        url="https://example.com",
+    )
+    old_plugin._update_plugin_type(True, False)  # noqa: SLF001
+    old_plugin._set_module(SimpleNamespace(__name__="builtin.builtin_name"))  # noqa: SLF001
+    new_plugin = NekroPlugin(
+        name="Local",
+        module_name="local_name",
+        description="lower priority",
+        version="0.1.0",
+        author="Tester",
+        url="https://example.com",
+    )
+    new_plugin._key = old_plugin.key  # noqa: SLF001
+    collector.loaded_plugins[old_plugin.key] = old_plugin
+    plugin_file = collector.workdir_plugin_dir / "local_name.py"
+    plugin_file.write_text("plugin = None\n", encoding="utf-8")
+    monkeypatch.setattr(collector_module, "import_module", lambda _path: SimpleNamespace(plugin=new_plugin))
+
+    loaded = await collector._load_plugin_module("workdir.local_name", plugin_file)
+
+    assert loaded is False
+    assert collector.loaded_plugins[old_plugin.key] is old_plugin
+
+
+@pytest.mark.asyncio
+async def test_duplicate_key_init_failure_preserves_old_plugin(tmp_path: Path, monkeypatch):
+    from nekro_agent.services.plugin import collector as collector_module
+    from nekro_agent.services.plugin.base import NekroPlugin
+
+    collector = _make_collector_with_dirs(tmp_path)
+    old_plugin = NekroPlugin(
+        name="Cloud",
+        module_name="cloud_name",
+        description="existing plugin",
+        version="0.1.0",
+        author="Tester",
+        url="https://example.com",
+    )
+    old_plugin._update_plugin_type(False, True)  # noqa: SLF001
+    old_plugin._set_module(SimpleNamespace(__name__="packages.cloud_name"))  # noqa: SLF001
+    new_plugin = NekroPlugin(
+        name="Builtin",
+        module_name="builtin_name",
+        description="replacement plugin",
+        version="0.1.0",
+        author="Tester",
+        url="https://example.com",
+    )
+    new_plugin._key = old_plugin.key  # noqa: SLF001
+
+    async def fail_init() -> None:
+        raise RuntimeError("init failed")
+
+    new_plugin.init_method = fail_init
+    collector.loaded_plugins[old_plugin.key] = old_plugin
+    plugin_file = collector.builtin_plugin_dir / "builtin_name.py"
+    plugin_file.write_text("plugin = None\n", encoding="utf-8")
+    monkeypatch.setattr(collector_module, "import_module", lambda _path: SimpleNamespace(plugin=new_plugin))
+
+    loaded = await collector._load_plugin_module("builtin.builtin_name", plugin_file, is_builtin=True)
+
+    assert loaded is False
+    assert collector.loaded_plugins[old_plugin.key] is old_plugin
+
+
+def test_plugin_router_reload_replaces_actual_fastapi_routes(monkeypatch):
+    from fastapi import APIRouter, FastAPI
+    from fastapi.testclient import TestClient
+
+    from nekro_agent.services.plugin.base import NekroPlugin
+    from nekro_agent.services.plugin.collector import plugin_collector
+    from nekro_agent.services.plugin.router_manager import PluginRouterManager
+
+    def build_plugin(label: str) -> NekroPlugin:
+        plugin = NekroPlugin(
+            name="Route Demo",
+            module_name="route_demo",
+            description="route reload test",
+            version="0.1.0",
+            author="Tester",
+            url="https://example.com",
+        )
+        plugin._is_enabled = True  # noqa: SLF001
+
+        @plugin.mount_router()
+        def create_router() -> APIRouter:
+            router = APIRouter()
+
+            @router.get("/value")
+            async def get_value() -> dict[str, str]:
+                return {"value": label}
+
+            return router
+
+        return plugin
+
+    old_plugin = build_plugin("old")
+    new_plugin = build_plugin("new")
+    active_plugin = {"value": old_plugin}
+    monkeypatch.setattr(plugin_collector, "get_plugin", lambda _key: active_plugin["value"])
+
+    app = FastAPI()
+    manager = PluginRouterManager()
+    manager.set_app(app)
+    assert manager.mount_plugin_router(old_plugin) is True
+    client = TestClient(app)
+    route_path = f"/plugins/{old_plugin.key}/value"
+    assert client.get(route_path).json() == {"value": "old"}
+
+    active_plugin["value"] = new_plugin
+    assert manager.reload_plugin_router(new_plugin) is True
+    assert client.get(route_path).json() == {"value": "new"}
+    assert [getattr(route, "path", None) for route in app.router.routes].count(route_path) == 1
+
+    assert manager.unmount_plugin_router(new_plugin.key) is True
+    assert client.get(route_path).status_code == 404

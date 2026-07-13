@@ -184,7 +184,8 @@ async def get_plugin_docs(
 @require_role(Role.Admin)
 async def reload_plugins(module_name: str, _current_user: DBUser = Depends(get_current_active_user)) -> ActionResponse:
     """重载插件"""
-    await plugin_collector.reload_plugin_by_module_name(module_name)
+    if not await plugin_collector.reload_plugin_by_module_name(module_name):
+        raise PluginLoadError(plugin_id=module_name)
     return ActionResponse(ok=True)
 
 

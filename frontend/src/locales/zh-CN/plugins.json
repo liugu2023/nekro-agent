@@ -237,10 +237,12 @@
       "createCleanupFailed": "{{saveMessage}}；清理未完成：{{cleanupMessage}}",
       "deleteSuccess": "文件删除成功",
       "deleteFailed": "删除失败",
+      "deleteRefreshFailed": "文件已删除，但刷新文件列表失败",
       "selectPluginFirst": "请先选择一个插件文件",
       "invalidModuleName": "无法获取有效的模块名",
       "reloadFailed": "重载插件失败",
       "reloadSuccess": "插件 {{name}} 重载成功",
+      "reloadRefreshFailed": "插件已重载，但刷新文件列表失败",
       "toggleSuccess": "插件{{action}}成功",
       "toggleFailed": "{{action}}插件失败",
       "codeCopied": "代码已复制到剪贴板",
@@ -252,6 +254,10 @@
       "pluginDevProposalReady": "后台 CC 已生成写入提案",
       "pluginDevProposalApplied": "提案已写入文件，版本号：{{version}}",
       "pluginDevRollbackSuccess": "已回退并写入新版本，版本号：{{version}}",
+      "pluginDevRollbackDeletedSuccess": "已回退到文件不存在的状态，版本号：{{version}}",
+      "rollbackFailed": "回滚失败",
+      "rollbackRefreshFailed": "回滚已成功，但刷新编辑器失败",
+      "proposalStateReconciled": "提案状态已在其他页面更新，当前页面已同步",
       "pluginDevStarted": "插件开发沙盒已启动",
       "pluginDevStartFailed": "插件开发沙盒启动失败",
       "pluginDevConfigSaved": "插件开发沙盒配置已保存",
@@ -278,7 +284,8 @@
       "reloadTitle": "确认重载",
       "reloadMessage": "确定要重载当前插件吗？这将重新初始化插件并应用代码变更。",
       "toggleTitle": "{{action}}插件",
-      "toggleMessage": "确定要{{action}}当前插件吗？"
+      "toggleMessage": "确定要{{action}}当前插件吗？",
+      "unsavedSwitchMessage": "当前文件有未保存修改，切换文件将丢失这些修改。是否继续？"
     },
     "generatorModes": {
       "basic": "基础生成",

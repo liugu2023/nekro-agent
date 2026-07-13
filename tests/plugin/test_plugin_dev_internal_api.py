@@ -1458,3 +1458,165 @@ def test_plugin_dev_rollback_restores_file_existence(tmp_path: Path, monkeypatch
     )
     versioning.rollback("old_file.py", deleted_version, "before")
     assert (plugin_root / "old_file.py").read_text(encoding="utf-8") == "OLD = 1\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_target", ["proposal", "task"])
+async def test_plugin_dev_apply_metadata_failure_restores_transaction(
+    tmp_path: Path,
+    monkeypatch,
+    failure_target: str,
+):
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
+    from nekro_agent.services.plugin_dev import tasks, versioning
+
+    plugin_root = tmp_path / "plugins"
+    proposal_dir = tmp_path / "proposals"
+    task_dir = tmp_path / "tasks"
+    history_dir = tmp_path / "history"
+    plugin_root.mkdir()
+    task_dir.mkdir()
+    plugin_file = plugin_root / "demo.py"
+    plugin_file.write_text("plugin = None\n", encoding="utf-8")
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_TASK_DIR", task_dir)
+    monkeypatch.setattr(versioning, "PLUGIN_DEV_HISTORY_DIR", history_dir)
+    monkeypatch.setattr(versioning, "PLUGIN_DEV_VERSION_PATH", tmp_path / "version.json")
+
+    async def fake_check(file_path: str, code: str, **_kwargs):
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    monkeypatch.setattr(tasks, "run_plugin_self_check", fake_check)
+    proposal = tasks.create_proposal(
+        task_id="metadata-failure",
+        file_path="demo.py",
+        before="plugin = None\n",
+        after="plugin = 'updated'\n",
+        summary="元数据失败补偿",
+    )
+    _write_plugin_dev_task_file(
+        task_dir,
+        "metadata-failure",
+        "waiting_apply",
+        proposal_id=proposal.proposal_id,
+    )
+    proposal_path = proposal_dir / f"{proposal.proposal_id}.json"
+    task_path = task_dir / "metadata-failure.json"
+    original_proposal = proposal_path.read_bytes()
+    original_task = task_path.read_bytes()
+    original_write_json = tasks._write_json
+    failed = False
+
+    def fail_one_metadata_write(path: Path, data: dict) -> None:
+        nonlocal failed
+        target_path = proposal_path if failure_target == "proposal" else task_path
+        if not failed and path == target_path:
+            failed = True
+            raise OSError(f"{failure_target} metadata write failed")
+        original_write_json(path, data)
+
+    monkeypatch.setattr(tasks, "_write_json", fail_one_metadata_write)
+
+    with pytest.raises(OSError, match="metadata write failed"):
+        await tasks.apply_proposal(proposal.proposal_id)
+
+    assert plugin_file.read_text(encoding="utf-8") == "plugin = None\n"
+    assert proposal_path.read_bytes() == original_proposal
+    assert task_path.read_bytes() == original_task
+    assert versioning.get_history("demo.py").versions == []
+    assert not list(history_dir.rglob("*-before.py"))
+    assert not list(history_dir.rglob("*-after.py"))
+
+
+def test_plugin_dev_history_pruning_can_be_deferred(tmp_path: Path, monkeypatch):
+    from nekro_agent.services.plugin_dev import versioning
+
+    history_root = tmp_path / "history"
+    monkeypatch.setattr(versioning, "PLUGIN_DEV_HISTORY_DIR", history_root)
+    monkeypatch.setattr(versioning, "PLUGIN_DEV_VERSION_PATH", tmp_path / "version.json")
+    version_ids = iter(f"version-{index:02d}" for index in range(51))
+    monkeypatch.setattr(versioning, "version_id_now", lambda: next(version_ids))
+
+    for index in range(51):
+        versioning.record_version(
+            file_path="demo.py",
+            task_id=f"task-{index}",
+            action="apply",
+            before_content=str(index),
+            after_content=str(index + 1),
+            summary="延迟裁剪",
+            prune=False,
+        )
+
+    assert len(versioning.get_history("demo.py").versions) == 51
+    first_snapshot = history_root / versioning.safe_file_slug("demo.py") / "version-00-before.py"
+    assert first_snapshot.exists()
+    versioning.prune_version_history("demo.py")
+    assert len(versioning.get_history("demo.py").versions) == 50
+    assert not first_snapshot.exists()
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_sandbox_stop_failure_preserves_runtime_state_and_token(monkeypatch):
+    from nekro_agent.services.plugin_dev import sandbox
+
+    state = sandbox.PluginDevSandboxState(
+        status="active",
+        container_name="plugin-dev-test",
+        sandbox_api_token="active-token",
+    )
+
+    class FailingContainer:
+        async def stop(self, *, t: int) -> None:
+            raise OSError(f"stop failed after {t}s")
+
+    class FakeContainers:
+        async def get(self, _name: str) -> FailingContainer:
+            return FailingContainer()
+
+    class FakeDocker:
+        containers = FakeContainers()
+
+        async def close(self) -> None:
+            return None
+
+    async def container_running(_name: str | None) -> bool:
+        return True
+
+    monkeypatch.setattr(sandbox.PluginDevSandboxService, "_ensure_state", staticmethod(lambda: state))
+    monkeypatch.setattr(sandbox.PluginDevSandboxService, "_save_state", staticmethod(lambda value: value))
+    monkeypatch.setattr(sandbox.PluginDevSandboxService, "_container_running", staticmethod(container_running))
+    monkeypatch.setattr(sandbox.aiodocker, "Docker", FakeDocker)
+
+    result = await sandbox.PluginDevSandboxService._stop_unlocked()
+    assert result.status == "active"
+    assert result.sandbox_api_token == "active-token"
+    assert result.last_error and "停止容器失败" in result.last_error
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_history_routes_reject_path_aliases(tmp_path: Path, monkeypatch):
+    from nekro_agent.routers import plugin_dev
+    from nekro_agent.schemas.errors import ValidationError
+
+    plugin_root = tmp_path / "plugins"
+    (plugin_root / "pkg").mkdir(parents=True)
+    (plugin_root / "pkg" / "demo.py").write_text("plugin = None\n", encoding="utf-8")
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.host_file_gateway.WORKDIR_PLUGIN_DIR", str(plugin_root))
+
+    with pytest.raises(ValidationError):
+        await plugin_dev.get_plugin_dev_history.__wrapped__(
+            file_path="pkg/sub/../demo.py",
+            _current_user=None,
+        )
+    with pytest.raises(ValidationError):
+        await plugin_dev.rollback_plugin_dev_file.__wrapped__(
+            body=plugin_dev.PluginDevRollbackRequest(version_id="version", target="before"),
+            file_path="pkg/sub/../demo.py",
+            _current_user=None,
+        )
