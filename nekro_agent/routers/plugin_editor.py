@@ -7,6 +7,7 @@ from fastapi import Path as PathParam
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.core.os_env import WORKDIR_PLUGIN_DIR
 from nekro_agent.models.db_user import DBUser
 from nekro_agent.schemas.errors import NotFoundError, PluginLoadError, ValidationError
@@ -20,6 +21,8 @@ from nekro_agent.services.plugin.generator import (
 from nekro_agent.services.runtime_state import is_shutting_down
 from nekro_agent.services.user.deps import get_current_active_user
 from nekro_agent.services.user.perm import Role, require_role
+
+logger = get_sub_logger("plugin_editor")
 
 router = APIRouter(prefix="/plugin-editor", tags=["Plugin Editor"])
 
@@ -60,6 +63,26 @@ def _resolve_plugin_file(file_path: str, *, must_exist: bool = False) -> tuple[P
     if must_exist and not full_path.is_file():
         raise NotFoundError(resource=f"文件 {file_path}")
     return plugin_dir, full_path
+
+
+async def _reload_top_level_plugin(module_name: str) -> str:
+    """重载顶层插件，成功返回空字符串，失败返回原因。
+
+    collector 对「插件处于禁用状态」等情况会抛 ValueError，调用方需要把它归一成
+    失败原因而不是让未分类异常冒到接口层。
+    """
+    try:
+        if await plugin_collector.reload_plugin_by_module_name(module_name):
+            return ""
+    except Exception as e:
+        logger.warning(f"重载插件 `{module_name}` 失败: {e}")
+        return str(e)
+    return "插件加载失败"
+
+
+def _top_level_entry_enabled(plugin_dir: Path, module_name: str) -> bool:
+    """顶层插件入口当前是否处于启用状态（单文件插件或包插件）"""
+    return (plugin_dir / f"{module_name}.py").exists() or (plugin_dir / module_name / "__init__.py").exists()
 
 
 @router.get("/files", summary="获取插件文件列表", response_model=list[str])
@@ -134,12 +157,14 @@ async def delete_plugin_file(
 
     # 按顶层模块名卸载（包内文件删除时卸载其所属的顶层包插件），
     # 避免已注册的命令、路由继续引用即将删除的旧模块。
-    await plugin_collector.unload_plugin_by_module_name(module_name)
+    # 限定 local 范围：工作目录文件可能与已加载的内置/云端插件同名（被更高优先级来源遮蔽），
+    # 此时删除文件不能误卸载那个同名插件。
+    await plugin_collector.unload_plugin_by_module_name(module_name, scope="local")
 
     try:
         full_path.unlink()
     except OSError as exc:
-        if was_loaded and not await plugin_collector.reload_plugin_by_module_name(module_name):
+        if was_loaded and await _reload_top_level_plugin(module_name):
             raise PluginLoadError(plugin_id=module_name, detail="删除文件失败后无法恢复插件运行状态") from exc
         raise
 
@@ -147,8 +172,12 @@ async def delete_plugin_file(
     if len(relative_path.parts) > 1 and top_level_package_entry.exists():
         # 删除普通包内文件后恢复顶层包运行。若删除的是被入口依赖的模块，
         # collector 会记录加载失败并让插件保持卸载，文件删除本身仍视为成功。
-        if not await plugin_collector.reload_plugin_by_module_name(relative_path.parts[0]):
-            raise PluginLoadError(plugin_id=relative_path.parts[0], detail="文件已删除，但插件重新加载失败")
+        failure_reason = await _reload_top_level_plugin(relative_path.parts[0])
+        if failure_reason:
+            logger.warning(
+                f"插件文件 {file_path} 已删除，但顶层包 {relative_path.parts[0]} 重新加载失败，"
+                f"插件保持卸载状态: {failure_reason}",
+            )
 
     return ActionResponse(ok=True)
 
@@ -159,11 +188,9 @@ async def toggle_plugin_file(
     file_path: str = PathParam(...),
     _current_user: DBUser = Depends(get_current_active_user),
 ) -> ToggleFileResponse:
-    """通过重命名插件入口文件启用或禁用插件。"""
+    """通过重命名启用或禁用插件入口文件，或包插件内部的普通模块文件。"""
     plugin_dir, full_path = _resolve_plugin_file(file_path, must_exist=True)
     relative_path = full_path.relative_to(plugin_dir)
-    if len(relative_path.parts) > 1 and relative_path.name not in {"__init__.py", "__init__.py.disabled"}:
-        raise ValidationError(reason="仅允许启用或禁用插件入口文件")
     is_disabled = full_path.name.endswith(".py.disabled")
     enabled_path = full_path.with_name(full_path.name.removesuffix(".disabled"))
     disabled_path = full_path.with_name(f"{full_path.name}.disabled")
@@ -172,26 +199,38 @@ async def toggle_plugin_file(
     if target_path.exists():
         raise ValidationError(reason=f"目标文件 {target_path.relative_to(plugin_dir).as_posix()} 已存在")
 
-    module_name = relative_path.parts[0]
-    if not is_disabled:
-        was_loaded = plugin_collector.get_plugin_by_module_name(module_name) is not None
-        await plugin_collector.unload_plugin_by_module_name(module_name)
-        try:
-            full_path.rename(target_path)
-        except OSError as exc:
-            if was_loaded and not await plugin_collector.reload_plugin_by_module_name(module_name):
-                raise PluginLoadError(plugin_id=module_name, detail="禁用文件失败后无法恢复插件运行状态") from exc
-            raise
-    else:
+    # 统一按规范化后的顶层模块名操作：relative_path.parts[0] 仍带 .py/.py.disabled 后缀，
+    # 直接用它判断入口状态会得到错误结果
+    module_name = plugin_collector.normalize_plugin_module_name(relative_path.as_posix())
+    was_loaded = plugin_collector.get_plugin_by_module_name(module_name) is not None
+
+    # 无论切换的是插件入口还是包内模块，都要先卸载所属的顶层插件：
+    # 已注册的命令与路由不能继续引用即将改名的模块。
+    # 限定 local 范围：工作目录文件可能与已加载的内置/云端插件同名（被更高优先级来源遮蔽），
+    # 此时不能误卸载那个同名插件。
+    await plugin_collector.unload_plugin_by_module_name(module_name, scope="local")
+    try:
         full_path.rename(target_path)
-        target_relative_path = target_path.relative_to(plugin_dir)
-        reload_ref = target_relative_path.parts[0] if len(target_relative_path.parts) > 1 else target_relative_path.as_posix()
-        if not await plugin_collector.reload_plugin_by_module_name(reload_ref):
-            try:
-                target_path.rename(full_path)
-            except OSError as exc:
-                raise PluginLoadError(plugin_id=module_name, detail="插件加载失败，且无法恢复禁用文件名") from exc
-            raise PluginLoadError(plugin_id=module_name)
+    except OSError as exc:
+        if was_loaded and await _reload_top_level_plugin(module_name):
+            raise PluginLoadError(plugin_id=module_name, detail="切换插件文件状态失败后无法恢复插件运行状态") from exc
+        raise
+
+    # 改名后按顶层入口的实际状态决定是否恢复运行：
+    # 入口被禁用则保持卸载；入口仍启用（含包内模块启停、入口刚被启用）则必须重载，
+    # 否则插件会在接口返回成功的同时从运行时静默消失。
+    if not _top_level_entry_enabled(plugin_dir, module_name):
+        return ToggleFileResponse(ok=True, file_path=target_path.relative_to(plugin_dir).as_posix())
+
+    failure_reason = await _reload_top_level_plugin(module_name)
+    if failure_reason:
+        try:
+            target_path.rename(full_path)
+        except OSError as exc:
+            raise PluginLoadError(plugin_id=module_name, detail="插件加载失败，且无法恢复原文件名") from exc
+        if was_loaded:
+            await _reload_top_level_plugin(module_name)
+        raise PluginLoadError(plugin_id=module_name, detail=failure_reason)
 
     return ToggleFileResponse(ok=True, file_path=target_path.relative_to(plugin_dir).as_posix())
 

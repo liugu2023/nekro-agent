@@ -688,10 +688,6 @@ function MessageContent({
           )
         }
 
-        if (seg.type === 'at') {
-          return <AtMention key={i} segment={seg} isDark={theme.palette.mode === 'dark'} />
-        }
-
         if (seg.type === 'json_card') {
           return (
             <JsonCardComponent

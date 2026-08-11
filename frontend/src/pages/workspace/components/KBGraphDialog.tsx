@@ -636,10 +636,11 @@ function buildCategoryForest(entries: CategoryEntry[]): CategoryTreeNode[] {
 
     let parent: CategoryTreeNode | null = null
     let currentPath = ''
-    segments.forEach((segment, index) => {
+    // for...of 而非 forEach：回调内的赋值不会被 TS 纳入控制流分析，parent 会被收窄为 never
+    for (const [index, segment] of segments.entries()) {
       currentPath = `${currentPath}${segment}/`
       parent = ensureCategoryNode(currentPath, parent, segment, index + 1)
-    })
+    }
 
     parent?.entries.push({ ...entry, category })
   }

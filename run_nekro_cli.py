@@ -44,7 +44,6 @@ def _build_fallback_report(candidate_path: str, level: str, error_message: str) 
         "candidate_path": candidate_path,
         "runtime_data_dir": "",
         "staged_path": "",
-        "staged_entry_path": "",
         "stage_mode": "file",
         "plugin": None,
         "checks": [
@@ -180,9 +179,15 @@ def _run_plugin_check_worker(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    os.chdir(REPO_ROOT)
     parser = _build_parser()
     args = parser.parse_args()
+
+    # 用户传入的相对路径必须按调用方 cwd 解析；chdir 之后再解析会错误地指向仓库根目录
+    if getattr(args, "path", None):
+        args.path = str(Path(args.path).expanduser().resolve())
+    if getattr(args, "report_file", None):
+        args.report_file = str(Path(args.report_file).expanduser().resolve())
+    os.chdir(REPO_ROOT)
 
     if args.command == "plugin" and args.plugin_command == "check":
         return _run_plugin_check(args)

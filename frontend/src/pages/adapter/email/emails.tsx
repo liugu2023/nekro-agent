@@ -337,7 +337,7 @@ function DetailContent({
                 <Stack spacing={1.25}>
                   {attachments.map(attachment => (
                     <AttachmentPreview
-                      key={attachment}
+                      key={attachment.name}
                       attachment={attachment}
                       expanded={expandedAttachment === attachment.name}
                       onToggle={() =>

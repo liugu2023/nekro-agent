@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Autocomplete,
@@ -44,6 +44,7 @@ import { useTranslation } from 'react-i18next'
 
 import ActionButton from '../../components/common/ActionButton'
 import IconActionButton from '../../components/common/IconActionButton'
+import { ApiError } from '../../services/api/axios'
 import { ccModelPresetApi, CCModelPresetInfo } from '../../services/api/cc-model-preset'
 import {
   pluginDevApi,
@@ -57,7 +58,7 @@ import {
 import { pluginEditorApi } from '../../services/api/plugin-editor'
 import { getPlugins, Plugin, reloadPlugins, togglePluginEnabled } from '../../services/api/plugins'
 import PluginFileSelect from './plugin-file-select'
-import { findPluginByFile, isDisabledPluginEntry, topModuleNameOf } from './plugin-file-utils'
+import { findPluginByFile, isDisabledPluginEntry, resolvePluginEntryFile, topModuleNameOf } from './plugin-file-utils'
 import { useNotification } from '../../hooks/useNotification'
 import { BORDER_RADIUS, CARD_STYLES, CHIP_VARIANTS } from '../../theme/variants'
 
@@ -74,7 +75,6 @@ interface PluginCcEditorDraft {
   code: string
   originalCode: string
   prompt: string
-  generatedCode: string
   taskId: string
 }
 
@@ -137,11 +137,18 @@ interface DiffViewerProps {
   diff: string
 }
 
-function DiffViewer({ diff }: DiffViewerProps) {
+// 仅匹配真实的 unified diff 头部，避免误过滤以 '---'/'+++' 开头的内容行（如删除的 '--force'）
+const DIFF_HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/
+
+const DiffViewer = memo(function DiffViewer({ diff }: DiffViewerProps) {
   const theme = useTheme()
-  const lines = diff
-    .split('\n')
-    .filter(line => !line.startsWith('@@') && !line.startsWith('+++') && !line.startsWith('---'))
+  const lines = useMemo(
+    () =>
+      diff
+        .split('\n')
+        .filter(line => !DIFF_HUNK_HEADER_RE.test(line) && !line.startsWith('+++ ') && !line.startsWith('--- ')),
+    [diff]
+  )
 
   const getLineStyle = (line: string) => {
     if (line.startsWith('+')) {
@@ -177,9 +184,9 @@ function DiffViewer({ diff }: DiffViewerProps) {
             lineHeight: 1.55,
             whiteSpace: 'pre-wrap',
             wordBreak: 'break-word',
-            borderLeft: line.startsWith('+') && !line.startsWith('+++')
+            borderLeft: line.startsWith('+')
               ? `3px solid ${theme.palette.success.main}`
-              : line.startsWith('-') && !line.startsWith('---')
+              : line.startsWith('-')
                 ? `3px solid ${theme.palette.error.main}`
                 : '3px solid transparent',
             ...getLineStyle(line),
@@ -190,7 +197,7 @@ function DiffViewer({ diff }: DiffViewerProps) {
       ))}
     </Box>
   )
-}
+})
 
 interface ClaudeCodeLogEntry {
   raw: string
@@ -632,6 +639,7 @@ interface EditorContextPanelProps {
   selectedFile: string
   code: string
   proposalDiff: string
+  hasProposal: boolean
   hasLocalChanges: boolean
   isBusy: boolean
   isApplyingProposal: boolean
@@ -653,6 +661,7 @@ function EditorContextPanel({
   selectedFile,
   code,
   proposalDiff,
+  hasProposal,
   hasLocalChanges,
   isBusy,
   isApplyingProposal,
@@ -693,7 +702,7 @@ function EditorContextPanel({
           <span>
             <IconActionButton
               size="small"
-              color="primary"
+              tone="primary"
               onClick={onReloadPlugin}
               disabled={isBusy || !selectedFile}
             >
@@ -713,7 +722,7 @@ function EditorContextPanel({
           <span>
             <IconActionButton
               size="small"
-              color={isPluginDisabled ? 'success' : 'warning'}
+              tone="primary"
               onClick={onTogglePlugin}
               disabled={isBusy || pluginEnabled === null}
             >
@@ -725,7 +734,7 @@ function EditorContextPanel({
           <span>
             <IconActionButton
               size="small"
-              color="error"
+              tone="danger"
               onClick={onDeletePlugin}
               disabled={isBusy || !selectedFile}
             >
@@ -734,15 +743,20 @@ function EditorContextPanel({
           </span>
         </Tooltip>
       </Stack>
-      {hasLocalChanges && !hasProposalDiff && <Alert severity="warning" sx={{ flexShrink: 0 }}>{t('editor.pluginDev.unsavedContext')}</Alert>}
+      {hasLocalChanges && !hasProposal && <Alert severity="warning" sx={{ flexShrink: 0 }}>{t('editor.pluginDev.unsavedContext')}</Alert>}
+      {hasProposal && !hasProposalDiff && (
+        <Alert severity="info" sx={{ flexShrink: 0 }}>{t('editor.pluginDev.proposalNoChanges')}</Alert>
+      )}
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ flexShrink: 0 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexGrow: 1, minWidth: 0 }}>
           <CodeIcon fontSize="small" color="primary" />
           <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-            {hasProposalDiff ? t('editor.pluginDev.currentProposal') : t('editor.pluginDev.sourceSnapshot')}
+            {hasProposal ? t('editor.pluginDev.currentProposal') : t('editor.pluginDev.sourceSnapshot')}
           </Typography>
         </Box>
-        {hasProposalDiff ? (
+        {/* 只要存在待处理提案就渲染操作按钮：提案 diff 为空（CC 返回与原文件一致的代码）时，
+            界面仍被 hasPendingProposal 锁定，若不渲染按钮用户将无法清除提案 */}
+        {hasProposal ? (
           <Stack direction="row" spacing={1} sx={{ flexShrink: 0, justifyContent: { xs: 'flex-start', sm: 'flex-end' }, flexWrap: 'wrap' }}>
             <ActionButton tone="ghost" onClick={onClearProposal} disabled={isApplyingProposal}>
               {t('editor.pluginDev.clearProposal')}
@@ -1009,7 +1023,6 @@ export default function PluginCcEditorPage() {
   const [code, setCode] = useState('')
   const [originalCode, setOriginalCode] = useState('')
   const [prompt, setPrompt] = useState('')
-  const [generatedCode, setGeneratedCode] = useState('')
 
   const [status, setStatus] = useState<PluginDevStatusResponse | null>(null)
   const [task, setTask] = useState<PluginDevTaskResponse | null>(null)
@@ -1043,6 +1056,9 @@ export default function PluginCcEditorPage() {
   const syncedCandidateKeyRef = useRef('')
   const mountedRef = useRef(false)
   const fileSelectionRunIdRef = useRef(0)
+  // 供长生命周期回调（挂载时恢复的任务流等）读取最新选中文件，避免闭包捕获过期值
+  const selectedFileRef = useRef('')
+  const hasLocalChangesRef = useRef(false)
 
   const hasPendingProposal = task?.status === 'waiting_apply'
   const hasRunningTask = Boolean(task && RUNNING_TASK_STATUSES.has(task.status))
@@ -1054,12 +1070,12 @@ export default function PluginCcEditorPage() {
   const isInteractionLocked = isBusy || hasPendingProposal || hasRunningTask
   const canStopTask = Boolean(currentTaskId && (isGenerating || hasRunningTask))
   const canReconnectTaskStream = Boolean(currentTaskId && (isGenerating || hasRunningTask || isTaskStreamFallback))
-  const selectedPluginEnabled = pluginInfo
-    ? pluginInfo.loadFailed
-      ? true
-      : pluginInfo.enabled
-    : isDisabledPluginEntry(selectedFile)
-      ? false
+  const selectedPluginEnabled = isDisabledPluginEntry(selectedFile)
+    ? false
+    : pluginInfo
+      ? pluginInfo.loadFailed
+        ? true
+        : pluginInfo.enabled
       : null
 
   const loadFiles = async (serverActiveTaskId: string | null = null) => {
@@ -1068,14 +1084,13 @@ export default function PluginCcEditorPage() {
       setFiles(pluginFiles)
       const draft = safeParseDraft(window.localStorage.getItem(PLUGIN_CC_EDITOR_DRAFT_KEY))
       const draftFile = draft?.selectedFile && pluginFiles.includes(draft.selectedFile) ? draft.selectedFile : ''
-      if (draftFile) {
+      if (draft && draftFile) {
         const diskContent = await pluginEditorApi.getPluginFileContent(draftFile)
         const canRestoreCode = typeof draft.originalCode === 'string' && diskContent === draft.originalCode
         setSelectedFile(draftFile)
         setCode(canRestoreCode ? draft.code || '' : diskContent)
         setOriginalCode(diskContent)
         setPrompt(draft.prompt || '')
-        setGeneratedCode(canRestoreCode ? draft.generatedCode || '' : '')
         if (!serverActiveTaskId) {
           setActiveTaskId(draft.taskId || '')
           restoredTaskIdRef.current = draft.taskId || null
@@ -1133,17 +1148,30 @@ export default function PluginCcEditorPage() {
   }, [])
 
   useEffect(() => {
+    selectedFileRef.current = selectedFile
+  }, [selectedFile])
+
+  useEffect(() => {
+    hasLocalChangesRef.current = hasLocalChanges
+  }, [hasLocalChanges])
+
+  // 只持久化仍需恢复的任务（运行中或待应用）；终态任务的 taskId 不再写入草稿，
+  // 避免每次进入页面重放旧任务、甚至对已被后台清理的任务拉流 404
+  const persistedTaskId = task
+    ? (RUNNING_TASK_STATUSES.has(task.status) || task.status === 'waiting_apply' ? task.task_id : '')
+    : activeTaskId
+
+  useEffect(() => {
     if (!selectedFile) return
     const draft: PluginCcEditorDraft = {
       selectedFile,
       code,
       originalCode,
       prompt,
-      generatedCode,
-      taskId: task?.task_id || activeTaskId,
+      taskId: persistedTaskId,
     }
     window.localStorage.setItem(PLUGIN_CC_EDITOR_DRAFT_KEY, JSON.stringify(draft))
-  }, [selectedFile, code, originalCode, prompt, generatedCode, task?.task_id, activeTaskId])
+  }, [selectedFile, code, originalCode, prompt, persistedTaskId])
 
   useEffect(() => {
     const taskId = restoredTaskIdRef.current
@@ -1171,7 +1199,6 @@ export default function PluginCcEditorPage() {
       setSelectedFile(file)
       setCode(content)
       setOriginalCode(content)
-      setGeneratedCode('')
       setTask(null)
       setActiveTaskId('')
     } catch (error) {
@@ -1227,7 +1254,14 @@ export default function PluginCcEditorPage() {
     if (syncedCandidateKeyRef.current === candidateKey) return
     syncedCandidateKeyRef.current = candidateKey
 
-    if (nextTask.file_path === selectedFile) {
+    if (nextTask.file_path === selectedFileRef.current) {
+      return
+    }
+
+    // 当前文件有未保存改动时不自动切换：切换会用另一个文件的内容覆盖编辑区，
+    // 未保存内容既不在磁盘也不在草稿里，将无声丢失
+    if (hasLocalChangesRef.current) {
+      notification.warning(t('editor.messages.proposalFileSwitchSkipped', { file: nextTask.file_path }))
       return
     }
 
@@ -1249,10 +1283,7 @@ export default function PluginCcEditorPage() {
   const applyTaskSnapshot = (nextTask: PluginDevTaskResponse): boolean => {
     setTask(nextTask)
     if (nextTask.diff || nextTask.result_code) {
-      setGeneratedCode(nextTask.diff || nextTask.result_code)
       syncProposalFileContext(nextTask)
-    } else {
-      setGeneratedCode([`${t('editor.pluginDev.progress')}: ${nextTask.status}`, ...nextTask.logs].join('\n'))
     }
 
     const completed = !RUNNING_TASK_STATUSES.has(nextTask.status)
@@ -1263,6 +1294,10 @@ export default function PluginCcEditorPage() {
         if (nextTask.status === 'failed') notification.error(nextTask.error || t('editor.messages.pluginDevGenerateFailed'))
       }
       setIsGenerating(false)
+      // 终态任务（waiting_apply 除外）不再保留 activeTaskId，草稿也随之不再持久化该任务
+      if (nextTask.status !== 'waiting_apply') {
+        setActiveTaskId('')
+      }
     }
     return completed
   }
@@ -1285,7 +1320,6 @@ export default function PluginCcEditorPage() {
           setSelectedFile(nextFile)
           setCode(content)
           setOriginalCode(content)
-          setGeneratedCode(content)
           if (historyOpen) await loadHistoryForFile(nextTask.file_path)
         } catch (refreshError) {
           const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
@@ -1387,7 +1421,6 @@ export default function PluginCcEditorPage() {
       syncedCandidateKeyRef.current = ''
       setTask(null)
       setActiveTaskId('')
-      setGeneratedCode('')
       try {
         const pluginFiles = await pluginEditorApi.getPluginFiles()
         const historyFileExists = pluginFiles.includes(historyFile)
@@ -1436,7 +1469,15 @@ export default function PluginCcEditorPage() {
     } catch (error) {
       if (!mountedRef.current || pollingTaskIdRef.current !== taskId || pollingRunIdRef.current !== runId) return
       const message = error instanceof Error ? error.message : t('editor.messages.unknownError')
-      notification.error(`${t('editor.messages.pluginDevGenerateFailed')}: ${message}`)
+      // 任务在服务端已不存在（超时清理、其他标签页应用后清理）时必须清掉本地任务 ID，
+      // 否则草稿会一直持久化这个死任务，之后每次进入页面都重复报错
+      if (error instanceof ApiError && error.type === 'NotFoundError') {
+        setActiveTaskId('')
+        setIsTaskStreamFallback(false)
+        notification.warning(t('editor.messages.pluginDevTaskGone'))
+      } else {
+        notification.error(`${t('editor.messages.pluginDevGenerateFailed')}: ${message}`)
+      }
       setIsGenerating(false)
     } finally {
       if (pollingTaskIdRef.current === taskId && pollingRunIdRef.current === runId) {
@@ -1500,7 +1541,6 @@ export default function PluginCcEditorPage() {
       setCode(template)
       setOriginalCode(template)
       setPrompt('')
-      setGeneratedCode('')
       setTask(null)
       setActiveTaskId('')
       setNewPluginOpen(false)
@@ -1541,7 +1581,6 @@ export default function PluginCcEditorPage() {
     setTask(null)
     setActiveTaskId('')
     syncedCandidateKeyRef.current = ''
-    setGeneratedCode(t('editor.pluginDev.waiting'))
     setPrompt('')
     try {
       const response = await pluginDevApi.generate({
@@ -1551,6 +1590,9 @@ export default function PluginCcEditorPage() {
         base_code: requestBaseCode,
         dirty: requestDirty,
         mode: 'proposal',
+        // 续话时带上原提案：包插件提案里新增的其他文件只存在于提案中，
+        // 不带过去会让这些文件在新一轮工作副本里消失
+        ...(pendingProposalId ? { base_proposal_id: pendingProposalId } : {}),
       })
       if (pendingProposalId) {
         void pluginDevApi.discardProposal(pendingProposalId).catch(() => undefined)
@@ -1620,7 +1662,6 @@ export default function PluginCcEditorPage() {
     stopTaskStream()
     setTask(null)
     setActiveTaskId('')
-    setGeneratedCode('')
     setIsGenerating(false)
     notification.info(t('editor.messages.generateCleared'))
   }
@@ -1649,7 +1690,6 @@ export default function PluginCcEditorPage() {
         setSelectedFile(proposalFile)
         setCode(content || '')
         setOriginalCode(content || '')
-        setGeneratedCode(content || '')
         if (historyOpen) {
           await loadHistoryForFile(proposalFile)
         }
@@ -1718,15 +1758,23 @@ export default function PluginCcEditorPage() {
     const action = nextEnabled ? t('editor.messages.enabled') : t('editor.messages.disabled')
     setIsFileOpBusy(true)
     try {
-      if (pluginInfo) {
+      // 选中的是 .py.disabled 入口时，用户意图是把这个文件改名启用：此时 pluginInfo 可能
+      // 匹配到同名的内置/云端插件（遮蔽场景），走运行时开关会切错插件且本地文件不会被启用。
+      // loadFailed 插件同样不能走运行时开关（后端会直接拒绝），落到文件级重命名分支。
+      const mustUseFileToggle = isDisabledPluginEntry(selectedFile)
+      if (pluginInfo && !pluginInfo.loadFailed && !mustUseFileToggle) {
         const ok = await togglePluginEnabled(pluginInfo.id, nextEnabled)
         if (!ok) {
           throw new Error(t('editor.messages.unknownError'))
         }
       } else {
-        const result = await pluginEditorApi.togglePluginFile(selectedFile)
-        setFiles(current => current.map(filePath => filePath === selectedFile ? result.file_path : filePath).sort())
-        setSelectedFile(result.file_path)
+        // 启停作用于插件入口：选中包内普通模块时不能去改那个模块的文件名
+        const toggleTarget = resolvePluginEntryFile(selectedFile, files)
+        const result = await pluginEditorApi.togglePluginFile(toggleTarget)
+        setFiles(current => current.map(filePath => filePath === toggleTarget ? result.file_path : filePath).sort())
+        if (selectedFile === toggleTarget) {
+          setSelectedFile(result.file_path)
+        }
         try {
           setFiles(await pluginEditorApi.getPluginFiles())
         } catch (refreshError) {
@@ -1825,6 +1873,7 @@ export default function PluginCcEditorPage() {
             selectedFile={selectedFile}
             code={code}
             proposalDiff={hasPendingProposal ? task?.diff || '' : ''}
+            hasProposal={hasPendingProposal}
             hasLocalChanges={hasLocalChanges}
             isBusy={isInteractionLocked || isFileOpBusy}
             isApplyingProposal={isApplyingProposal}
@@ -1964,7 +2013,7 @@ export default function PluginCcEditorPage() {
             <DialogContentText>{t('editor.pluginDev.configDescription')}</DialogContentText>
             <Autocomplete
               options={ccPresets}
-              value={selectedPreset}
+              value={selectedPreset ?? undefined}
               disableClearable
               onChange={(_, value) => setSelectedPreset(value)}
               getOptionLabel={option => option.name}

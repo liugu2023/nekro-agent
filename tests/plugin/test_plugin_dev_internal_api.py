@@ -318,7 +318,12 @@ async def test_plugin_dev_task_retries_cc_after_self_check_failure(tmp_path: Pat
         "python /workspace/default/plugin_dev_check.py /workspace/default/current/demo.py demo.py plugin-dev-retry-test static"
     )
 
-    def fake_prepare_task_workspace(_file_path: str, current_code: str) -> str:
+    def fake_prepare_task_workspace(
+        _file_path: str,
+        current_code: str,
+        extra_files: dict | None = None,
+        deleted_files: set | None = None,
+    ) -> str:
         candidate_host_path.parent.mkdir(parents=True, exist_ok=True)
         candidate_host_path.write_text(current_code, encoding="utf-8")
         return "/workspace/default/current/demo.py"
@@ -415,6 +420,148 @@ async def test_plugin_dev_task_retries_cc_after_self_check_failure(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_plugin_dev_task_accepts_self_check_recorded_by_internal_gateway(tmp_path: Path, monkeypatch):
+    """CC 未逐字复用自检命令时，应以内部网关记录的真实检查结果判定自检通过。"""
+    from nekro_agent.schemas.plugin_check import PluginCheckItem, PluginCheckReport
+    from nekro_agent.schemas.plugin_dev import PluginDevGenerateRequest
+    from nekro_agent.services.plugin_dev import tasks
+    from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
+
+    task_dir = tmp_path / "tasks"
+    proposal_dir = tmp_path / "proposals"
+    workspace_dir = tmp_path / "workspace"
+    candidate_host_path = workspace_dir / "default" / "current" / "demo.py"
+    task_id = "plugin-dev-gateway-record"
+    task_dir.mkdir()
+    proposal_dir.mkdir()
+    _write_plugin_dev_task_file(task_dir, task_id, "pending")
+
+    candidate_code = "plugin = 'fixed'\n"
+
+    def fake_prepare_task_workspace(
+        _file_path: str,
+        current_code: str,
+        extra_files: dict | None = None,
+        deleted_files: set | None = None,
+    ) -> str:
+        candidate_host_path.parent.mkdir(parents=True, exist_ok=True)
+        candidate_host_path.write_text(current_code, encoding="utf-8")
+        return "/workspace/default/current/demo.py"
+
+    async def fake_stream_generate(prompt: str):
+        yield {"type": "tool_call", "name": "Edit", "tool_use_id": "tool-1", "input": {"file_path": "/workspace/default/current/demo.py"}}
+        yield {"type": "tool_result", "tool_use_id": "tool-1"}
+        candidate_host_path.write_text(candidate_code, encoding="utf-8")
+        # CC 换了写法（改用 python3 且路径加引号），命令行子串匹配不中
+        yield {
+            "type": "tool_call",
+            "name": "Bash",
+            "tool_use_id": "tool-bash",
+            "input": {"command": "python3 '/workspace/default/plugin_dev_check.py' 'demo.py'"},
+        }
+        yield {"type": "tool_result", "tool_use_id": "tool-bash", "content": "done", "is_error": False}
+        yield "已写入候选"
+
+    async def fake_inspect_runtime(refresh_tools: bool = False):
+        return _fake_sandbox_runtime(tools=["Read", "Write", "Edit", "Bash"])
+
+    async def fake_run_plugin_self_check(
+        file_path: str, code: str, level: str = "static", extra_files: dict | None = None
+    ):
+        return PluginCheckReport(
+            ok=True,
+            candidate_path=file_path,
+            checks=[PluginCheckItem(id="plugin_load", title="加载插件", ok=True)],
+        )
+
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_TASK_DIR", task_dir)
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+    monkeypatch.setattr("nekro_agent.services.plugin_dev.sandbox.PLUGIN_DEV_WORKSPACE_DIR", workspace_dir)
+    monkeypatch.setattr(PluginDevSandboxService, "prepare_task_workspace", staticmethod(fake_prepare_task_workspace))
+    monkeypatch.setattr(PluginDevSandboxService, "inspect_runtime", staticmethod(fake_inspect_runtime))
+    monkeypatch.setattr(PluginDevSandboxService, "stream_generate", staticmethod(fake_stream_generate))
+    monkeypatch.setattr(tasks, "run_plugin_self_check", fake_run_plugin_self_check)
+
+    # 模拟 CC 通过内部网关真实执行过一次自检（网关侧按候选内容签名留档）
+    tasks.record_internal_check_result(
+        task_id=task_id,
+        files={"demo.py": candidate_code},
+        deleted_files=set(),
+        ok=True,
+        failure="",
+    )
+
+    body = PluginDevGenerateRequest(
+        file_path="demo.py",
+        prompt="修复插件",
+        current_code="plugin = None\n",
+        base_code="plugin = None\n",
+    )
+    await tasks._execute_task(task_id, body, "修复插件")
+
+    task_data = json.loads((task_dir / f"{task_id}.json").read_text(encoding="utf-8"))
+    assert task_data["status"] == "waiting_apply"
+    assert task_data["result_code"] == candidate_code
+    assert any("已按内部自检网关记录判定候选自检结果：通过" in log for log in task_data["logs"])
+
+
+@pytest.mark.asyncio
+async def test_plugin_dev_task_falls_back_to_workspace_after_discarding_stale_proposal(
+    tmp_path: Path, monkeypatch
+):
+    """残留提案与已拒绝候选一致时应被丢弃，并继续扫描工作副本里的新修复。"""
+    from nekro_agent.schemas.plugin_dev import PluginDevProposalResponse
+    from nekro_agent.services.plugin_dev import tasks
+
+    proposal_dir = tmp_path / "proposals"
+    proposal_dir.mkdir()
+    monkeypatch.setattr(tasks, "PLUGIN_DEV_PROPOSAL_DIR", proposal_dir)
+
+    def write_proposal(proposal_id: str, created_at: str, content: str) -> None:
+        (proposal_dir / f"{proposal_id}.json").write_text(
+            json.dumps(
+                {
+                    "proposal_id": proposal_id,
+                    "task_id": "task-1",
+                    "file_path": "demo.py",
+                    "status": "pending",
+                    "summary": "s",
+                    "before_sha256": "",
+                    "result_code": content,
+                    "diff": "",
+                    "created_at": created_at,
+                    "files": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    write_proposal("proposal-old", "2026-01-01T00:00:00", "plugin = 'bad'\n")
+    write_proposal("proposal-new", "2026-01-02T00:00:00", "plugin = 'bad'\n")
+
+    pending = tasks.list_pending_proposals_for_task("task-1")
+    assert [item.proposal_id for item in pending] == ["proposal-new", "proposal-old"]
+
+    rejected = {tasks._candidate_signature({"demo.py": "plugin = 'bad'\n"}, set())}
+    for proposal in pending:
+        signature = tasks._candidate_signature(
+            tasks._proposal_files_map(proposal),
+            tasks._proposal_deleted_files(proposal),
+        )
+        assert signature in rejected
+        tasks._discard_failed_proposal_for_retry(proposal, reason="内容未变化")
+
+    # 两个残留提案都必须被丢弃，否则旧提案会在后续轮次继续遮蔽工作副本候选
+    assert tasks.list_pending_proposals_for_task("task-1") == []
+    for proposal_id in ("proposal-old", "proposal-new"):
+        data = json.loads((proposal_dir / f"{proposal_id}.json").read_text(encoding="utf-8"))
+        assert data["status"] == "discarded"
+
+    assert isinstance(pending[0], PluginDevProposalResponse)
+
+
+@pytest.mark.asyncio
 async def test_plugin_dev_task_does_not_self_check_unchanged_default_code(tmp_path: Path, monkeypatch):
     from nekro_agent.schemas.plugin_dev import PluginDevGenerateRequest
     from nekro_agent.services.plugin_dev import tasks
@@ -447,7 +594,12 @@ async def test_plugin_dev_task_does_not_self_check_unchanged_default_code(tmp_pa
 
     checked_codes: list[str] = []
 
-    def fake_prepare_task_workspace(_file_path: str, current_code: str) -> str:
+    def fake_prepare_task_workspace(
+        _file_path: str,
+        current_code: str,
+        extra_files: dict | None = None,
+        deleted_files: set | None = None,
+    ) -> str:
         candidate_host_path.parent.mkdir(parents=True, exist_ok=True)
         candidate_host_path.write_text(current_code, encoding="utf-8")
         return "/workspace/default/current/demo.py"
@@ -528,7 +680,12 @@ async def test_plugin_dev_task_fails_fast_when_sandbox_write_tools_missing(tmp_p
 
     stream_called = False
 
-    def fake_prepare_task_workspace(_file_path: str, current_code: str) -> str:
+    def fake_prepare_task_workspace(
+        _file_path: str,
+        current_code: str,
+        extra_files: dict | None = None,
+        deleted_files: set | None = None,
+    ) -> str:
         candidate_host_path.parent.mkdir(parents=True, exist_ok=True)
         candidate_host_path.write_text(current_code, encoding="utf-8")
         return "/workspace/default/current/demo.py"
@@ -598,7 +755,12 @@ async def test_plugin_dev_task_fails_fast_on_cc_model_error(tmp_path: Path, monk
 
     checked_codes: list[str] = []
 
-    def fake_prepare_task_workspace(_file_path: str, current_code: str) -> str:
+    def fake_prepare_task_workspace(
+        _file_path: str,
+        current_code: str,
+        extra_files: dict | None = None,
+        deleted_files: set | None = None,
+    ) -> str:
         candidate_host_path.parent.mkdir(parents=True, exist_ok=True)
         candidate_host_path.write_text(current_code, encoding="utf-8")
         return "/workspace/default/current/demo.py"
@@ -929,7 +1091,12 @@ async def test_plugin_dev_package_task_produces_multi_file_proposal(tmp_path: Pa
         f"python /workspace/default/plugin_dev_check.py /workspace/default/current/mypkg mypkg/plugin.py {task_id} static"
     )
 
-    def fake_prepare_task_workspace(_file_path: str, current_code: str) -> str:
+    def fake_prepare_task_workspace(
+        _file_path: str,
+        current_code: str,
+        extra_files: dict | None = None,
+        deleted_files: set | None = None,
+    ) -> str:
         # 模拟真实 staging：拷贝真实包 + 覆盖主文件
         pkg_stage = current_root / "mypkg"
         pkg_stage.mkdir(parents=True, exist_ok=True)
@@ -1021,7 +1188,12 @@ async def test_plugin_dev_single_file_task_ignores_out_of_scope_files(tmp_path: 
     proposal_dir.mkdir()
     _write_plugin_dev_task_file(task_dir, task_id, "pending")
 
-    def fake_prepare_task_workspace(_file_path: str, current_code: str) -> str:
+    def fake_prepare_task_workspace(
+        _file_path: str,
+        current_code: str,
+        extra_files: dict | None = None,
+        deleted_files: set | None = None,
+    ) -> str:
         current_root.mkdir(parents=True, exist_ok=True)
         (current_root / "demo.py").write_text(current_code, encoding="utf-8")
         return "/workspace/default/current/demo.py"

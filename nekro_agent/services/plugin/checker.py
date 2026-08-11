@@ -31,25 +31,12 @@ logger = get_sub_logger("plugin_check")
 
 
 async def _ensure_plugin_check_schema() -> None:
-    conn = Tortoise.get_connection("default")
-    await conn.execute_script(
-        """
-        CREATE TABLE IF NOT EXISTS "plugin_data" (
-            "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-            "plugin_key" VARCHAR(128) NOT NULL,
-            "data_key" VARCHAR(128) NOT NULL,
-            "data_value" TEXT NOT NULL,
-            "target_chat_key" VARCHAR(64) NOT NULL,
-            "target_user_id" VARCHAR(256) NOT NULL,
-            "create_time" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            "update_time" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE INDEX IF NOT EXISTS "idx_plugin_data_plugin_key" ON "plugin_data" ("plugin_key");
-        CREATE INDEX IF NOT EXISTS "idx_plugin_data_data_key" ON "plugin_data" ("data_key");
-        CREATE INDEX IF NOT EXISTS "idx_plugin_data_target_chat_key" ON "plugin_data" ("target_chat_key");
-        CREATE INDEX IF NOT EXISTS "idx_plugin_data_target_user_id" ON "plugin_data" ("target_user_id");
-        """
-    )
+    """按模型定义为检查库建表。
+
+    检查环境使用一次性 sqlite 库，无需走 aerich 迁移；由模型派生建表可避免手写
+    DDL 与模型定义漂移，并保证插件访问任意业务模型时都有对应表存在。
+    """
+    await Tortoise.generate_schemas(safe=True)
 
 
 @dataclass(slots=True)
@@ -221,6 +208,10 @@ def _iter_candidate_python_files(layout: CandidateLayout) -> list[Path]:
     files = sorted(path for path in layout.root_path.rglob("*.py") if "__pycache__" not in path.parts)
     if layout.source_path.is_file() and layout.source_path not in files:
         files.append(layout.source_path)
+    # rglob("*.py") 匹配不到 __init__.py.disabled 形态的入口文件，需单独补入
+    entry_file = _static_entry_file(layout)
+    if entry_file.is_file() and entry_file not in files:
+        files.append(entry_file)
     return files
 
 
@@ -237,10 +228,20 @@ def _handles_import_error(handlers: list[ast.ExceptHandler]) -> bool:
     return False
 
 
+def _is_type_checking_test(test: ast.expr) -> bool:
+    """识别 `if TYPE_CHECKING:` / `if typing.TYPE_CHECKING:` 条件。"""
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+    if isinstance(test, ast.Attribute):
+        return test.attr == "TYPE_CHECKING"
+    return False
+
+
 def _iter_module_level_imports(tree: ast.Module) -> list[tuple[ast.Import | ast.ImportFrom, bool]]:
     """收集模块导入时会执行的 import 语句；bool 表示是否被 try/except ImportError 保护。
 
     函数体内的 import 是惰性执行，不影响插件加载，因此跳过。
+    `if TYPE_CHECKING:` 块内的 import 运行时不会执行，同样跳过。
     """
     results: list[tuple[ast.Import | ast.ImportFrom, bool]] = []
 
@@ -256,6 +257,8 @@ def _iter_module_level_imports(tree: ast.Module) -> list[tuple[ast.Import | ast.
                     visit_stmts(handler.body, guarded)
                 visit_stmts(stmt.orelse, guarded)
                 visit_stmts(stmt.finalbody, guarded)
+            elif isinstance(stmt, ast.If) and _is_type_checking_test(stmt.test):
+                visit_stmts(stmt.orelse, guarded)
             else:
                 for _, value in ast.iter_fields(stmt):
                     if not isinstance(value, list):
@@ -487,7 +490,13 @@ def _run_static_check(layout: CandidateLayout, report: PluginCheckReport) -> Non
         try:
             parsed_files.append((file_path, ast.parse(source, filename=str(file_path))))
         except SyntaxError as e:
-            syntax_errors.append(f"{file_path.name}:{e.lineno}: {e.msg}")
+            # 部分语法错误（如 NUL 字节）没有行号，直接拼接会产出 "file.py:None" 这种噪声
+            location = f":{e.lineno}" if e.lineno else ""
+            syntax_errors.append(f"{file_path.name}{location}: {e.msg}")
+        except ValueError as e:
+            # Python 3.11 对含 NUL 字节的源码抛 ValueError（3.12 起归一为 SyntaxError）；
+            # 不捕获会让检查子进程直接崩溃且不产出报告
+            syntax_errors.append(f"{file_path.name}: 源码解析失败（{e}）")
 
     if syntax_errors:
         _add_check(report, "static_syntax", "语法检查", False, error="；".join(syntax_errors[:5]))
@@ -564,6 +573,11 @@ def _validate_async_contracts(plugin: NekroPlugin) -> list[str]:
         if not inspect.iscoroutinefunction(method.func):
             issues.append(f"webhook `{endpoint}` 必须是 async 函数")
 
+    # 与静态清单 _ASYNC_REQUIRED_MOUNT_DECORATORS 对齐：async task 同样要求 async 定义
+    for task_type, func in getattr(plugin, "_async_tasks", {}).items():
+        if not (inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func)):
+            issues.append(f"async task `{task_type}` 必须是 async 函数")
+
     return issues
 
 
@@ -599,11 +613,10 @@ async def run_plugin_check(candidate_path: str | Path, level: PluginCheckLevel =
     try:
         await init_db()
         await _ensure_plugin_check_schema()
-        _add_check(report, "db_ready", "准备临时数据库", True, detail="已完成数据库初始化与最小表准备")
+        _add_check(report, "db_ready", "准备临时数据库", True, detail="已完成数据库初始化与建表")
 
         staged_entry = _stage_candidate(layout)
         report.staged_path = str(staged_entry)
-        report.staged_entry_path = str(staged_entry)
 
         try:
             await collector._try_load_plugin(staged_entry, is_builtin=False, is_package=False)

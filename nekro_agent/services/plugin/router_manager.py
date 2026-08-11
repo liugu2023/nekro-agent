@@ -79,6 +79,11 @@ class PluginRouterManager:
 
         plugin_router = plugin.get_plugin_router()
         if not plugin_router:
+            # 区分"未注册路由"与"路由构建失败"（get_plugin_router 内部吞异常返回 None）：
+            # 构建失败必须报告失败，否则重载路径会在旧路由已卸载后静默丢失全部插件路由
+            if getattr(plugin, "_router_func", None):
+                logger.error(f"❌ 插件 {plugin.name} 的路由构建失败，无法挂载")
+                return False
             return True
 
         existing_route_ids: Optional[Set[int]] = None

@@ -86,6 +86,9 @@ class PluginDevGenerateRequest(BaseModel):
     base_code: str = ""
     dirty: bool = False
     mode: Literal["proposal"] = "proposal"
+    # 在未应用的提案上继续对话时传入：用该提案的完整文件集播种工作副本，
+    # 否则提案里新增的包内文件不会出现在新一轮的工作副本中
+    base_proposal_id: str = ""
 
 
 class PluginDevInternalFileResponse(BaseModel):

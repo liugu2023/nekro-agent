@@ -4,8 +4,11 @@ import { ACTION_BUTTON_VARIANTS } from '../../theme/variants'
 
 export type ActionButtonTone = 'primary' | 'secondary' | 'ghost' | 'danger'
 
-interface ActionButtonProps extends Omit<ButtonProps, 'color'> {
+// 允许透传 MUI color（运行时本就透传给 Button 并生效）；新代码优先使用 tone 体系
+interface ActionButtonProps extends ButtonProps {
   tone?: ActionButtonTone
+  /** 供 component={RouterLink} 场景透传的目标路径 */
+  to?: string
 }
 
 const DEFAULT_VARIANT: Record<ActionButtonTone, ButtonProps['variant']> = {

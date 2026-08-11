@@ -8,6 +8,7 @@ import shlex
 import shutil
 import socket
 import tomllib
+from contextlib import suppress
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
 from pathlib import Path
@@ -236,6 +237,9 @@ class PluginDevSandboxState(BaseModel):
     last_error: str | None = None
     create_time: str = ""
     update_time: str = ""
+    # 容器创建时是否挂载了参考源码；用于判断运行中容器的挂载是否过期，
+    # 快照准备失败创建的无源码容器不会因此被反复重建
+    reference_source_mounted: bool = False
 
     @property
     def metadata(self) -> dict[str, str]:
@@ -273,8 +277,19 @@ class PluginDevSandboxService:
     def _load_state() -> PluginDevSandboxState | None:
         if not PLUGIN_DEV_SANDBOX_STATE_PATH.exists():
             return None
-        data = json.loads(PLUGIN_DEV_SANDBOX_STATE_PATH.read_text(encoding="utf-8"))
-        return PluginDevSandboxState.model_validate(data)
+        try:
+            data = json.loads(PLUGIN_DEV_SANDBOX_STATE_PATH.read_text(encoding="utf-8"))
+            return PluginDevSandboxState.model_validate(data)
+        except Exception as e:
+            # 状态文件损坏（写入中途被杀等）不能让状态查询、启动与内部网关鉴权全部 500；
+            # 隔离损坏文件后按新状态重建，此时运行中的容器持有旧 token，需要重启沙盒
+            logger.warning(
+                f"插件开发沙盒状态文件损坏，将隔离并重建（运行中的沙盒需重启才能恢复内部网关鉴权）: "
+                f"{PLUGIN_DEV_SANDBOX_STATE_PATH}: {e}",
+            )
+            with suppress(OSError):
+                PLUGIN_DEV_SANDBOX_STATE_PATH.replace(PLUGIN_DEV_SANDBOX_STATE_PATH.with_suffix(".json.corrupted"))
+            return None
 
     @staticmethod
     def _save_state(state: PluginDevSandboxState) -> PluginDevSandboxState:
@@ -282,23 +297,32 @@ class PluginDevSandboxService:
             state.create_time = PluginDevSandboxService._utc_now()
         state.update_time = PluginDevSandboxService._utc_now()
         PLUGIN_DEV_SANDBOX_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        PLUGIN_DEV_SANDBOX_STATE_PATH.write_text(
+        # 原子写：直接覆盖写时进程若在截断后被杀，状态文件会永久损坏
+        temp_path = PLUGIN_DEV_SANDBOX_STATE_PATH.with_suffix(".json.tmp")
+        temp_path.write_text(
             json.dumps(state.model_dump(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        temp_path.replace(PLUGIN_DEV_SANDBOX_STATE_PATH)
         return state
 
     @staticmethod
     def _ensure_state() -> PluginDevSandboxState:
         state = PluginDevSandboxService._load_state()
+        needs_save = False
         if state is None:
             state = PluginDevSandboxState(
                 sandbox_api_token=secrets.token_urlsafe(32),
                 create_time=PluginDevSandboxService._utc_now(),
             )
+            needs_save = True
         if not state.sandbox_api_token:
             state.sandbox_api_token = secrets.token_urlsafe(32)
-        return PluginDevSandboxService._save_state(state)
+            needs_save = True
+        # 内部网关每个请求都会经过这里取 token：状态未变化时不重写文件，避免纯粹的磁盘 churn
+        if needs_save:
+            return PluginDevSandboxService._save_state(state)
+        return state
 
     @staticmethod
     def get_internal_api_token() -> str:
@@ -469,7 +493,8 @@ class PluginDevSandboxService:
             return None, "Nekro Agent 参考源码未启用"
 
         try:
-            return PluginDevSandboxService._prepare_runtime_source_snapshot()
+            # 快照包含 git 状态检查与整树拷贝，属同步重活，放线程避免阻塞事件循环
+            return await asyncio.to_thread(PluginDevSandboxService._prepare_runtime_source_snapshot)
         except Exception as e:
             logger.warning(f"准备 Nekro Agent 参考源码失败: {e}")
             if PLUGIN_DEV_NEKRO_SOURCE_DIR.exists():
@@ -615,8 +640,9 @@ class PluginDevSandboxService:
         try:
             container = await docker.containers.get(container_name)
             exec_inst = await container.exec(["test", "-f", file_path], stdout=True, stderr=True)
+            # aiodocker 的 Stream 不支持 async for，只能通过 read_out() 读到 EOF
             async with exec_inst.start(detach=False) as stream:
-                async for _ in stream:
+                while await stream.read_out() is not None:
                     pass
             info = await exec_inst.inspect()
             return int(info.get("ExitCode", 1)) == 0
@@ -635,20 +661,34 @@ class PluginDevSandboxService:
     async def _start_unlocked() -> PluginDevSandboxState:
         state = PluginDevSandboxService._ensure_state()
         PluginDevSandboxService._write_runtime_files()
-        reference_source_dir, reference_source_message = await PluginDevSandboxService._ensure_reference_source()
-        logger.info(reference_source_message)
 
         if state.status == "active" and await PluginDevSandboxService._container_running(state.container_name):
-            if reference_source_dir and not await PluginDevSandboxService._container_file_exists(
-                state.container_name,
-                f"{_PLUGIN_DEV_SOURCE_CONTAINER_PATH}/run_nekro_cli.py",
-            ):
-                logger.warning("插件开发沙盒参考源码挂载已过期，正在重建容器")
-                await PluginDevSandboxService._remove_container(state.container_name)
-                state.status = "stopped"
-                PluginDevSandboxService._save_state(state)
-            else:
+            source_stale = (
+                get_plugin_dev_config().source_enabled
+                and state.reference_source_mounted
+                and not await PluginDevSandboxService._container_file_exists(
+                    state.container_name,
+                    f"{_PLUGIN_DEV_SOURCE_CONTAINER_PATH}/run_nekro_cli.py",
+                )
+            )
+            # 容器 Running 不代表沙盒 API 可用（API 进程被 OOM 杀死而 PID1 存活时，
+            # 容器层仍是 Running）。不做健康检查就早退会让坏沙盒永远不被重建，
+            # 之后每个任务都在健康检查处失败，只能由管理员手动 stop 才能恢复。
+            api_dead = not source_stale and not await CCSandboxClient(state, timeout=10.0).health_check()
+            if not source_stale and not api_dead:
                 return state
+            logger.warning(
+                "插件开发沙盒参考源码挂载已过期，正在重建容器"
+                if source_stale
+                else "插件开发沙盒容器仍在运行但 API 健康检查失败，正在重建容器",
+            )
+            await PluginDevSandboxService._remove_container(state.container_name)
+            state.status = "stopped"
+            PluginDevSandboxService._save_state(state)
+
+        # 参考源码快照只在确实需要（重）建容器时刷新，避免每次 start() 都全量拷贝
+        reference_source_dir, reference_source_message = await PluginDevSandboxService._ensure_reference_source()
+        logger.info(reference_source_message)
 
         await PluginDevSandboxService._remove_container(state.container_name)
 
@@ -671,7 +711,8 @@ class PluginDevSandboxService:
             f"{workspace_host_dir}:{CONTAINER_WORKSPACE_PATH}:rw",
             f"{claude_home_host_dir}:/home/appuser/.claude:rw",
         ]
-        if reference_source_dir and reference_source_dir.exists():
+        reference_source_mounted = bool(reference_source_dir and reference_source_dir.exists())
+        if reference_source_dir and reference_source_mounted:
             binds.append(f"{reference_source_dir.resolve()}:{_PLUGIN_DEV_SOURCE_CONTAINER_PATH}:ro")
         if Path("/etc/localtime").exists():
             binds.append("/etc/localtime:/etc/localtime:ro")
@@ -707,12 +748,18 @@ class PluginDevSandboxService:
             if docker_network:
                 container_config["HostConfig"]["NetworkMode"] = docker_network
 
-            container = await docker.containers.create_or_replace(name=container_name, config=container_config)
-            await container.start()
-            info = await container.show()
+            try:
+                container = await docker.containers.create_or_replace(name=container_name, config=container_config)
+                await container.start()
+                info = await container.show()
+            except Exception:
+                # state 尚未记录新容器名，启动失败必须就地回收，否则容器永久泄漏
+                await PluginDevSandboxService._remove_container(container_name)
+                raise
             state.container_name = container_name
             state.container_id = str(info["Id"])[:12]
             state.host_port = host_port
+            state.reference_source_mounted = reference_source_mounted
             state.status = "active"
             state.last_error = None
             PluginDevSandboxService._save_state(state)
@@ -743,14 +790,13 @@ class PluginDevSandboxService:
                     container = await docker.containers.get(state.container_name)
                     await container.stop(t=10)
                 except Exception as e:
-                    logger.warning(f"停止插件开发沙盒容器失败: {state.container_name}: {e}")
-                    state.status = (
-                        "active"
-                        if await PluginDevSandboxService._container_running(state.container_name)
-                        else "failed"
-                    )
-                    state.last_error = f"停止容器失败: {e}"
-                    return PluginDevSandboxService._save_state(state)
+                    if await PluginDevSandboxService._container_running(state.container_name):
+                        logger.warning(f"停止插件开发沙盒容器失败: {state.container_name}: {e}")
+                        state.status = "active"
+                        state.last_error = f"停止容器失败: {e}"
+                        return PluginDevSandboxService._save_state(state)
+                    # 容器已不存在（如被外部清理），期望结果即已停止，继续走停止流程轮换 token
+                    logger.info(f"插件开发沙盒容器已不存在，按已停止处理: {state.container_name}")
             finally:
                 await docker.close()
         state.status = "stopped"
@@ -796,12 +842,23 @@ class PluginDevSandboxService:
         return f"{CONTAINER_WORKSPACE_PATH}/default/current"
 
     @staticmethod
-    def prepare_task_workspace(file_path: str, current_code: str) -> str:
+    def prepare_task_workspace(
+        file_path: str,
+        current_code: str,
+        extra_files: "dict[str, str] | None" = None,
+        deleted_files: "set[str] | None" = None,
+    ) -> str:
         current_root = PLUGIN_DEV_WORKSPACE_DIR / "default" / "current"
         if current_root.exists():
             shutil.rmtree(current_root, ignore_errors=True)
         current_root.mkdir(parents=True, exist_ok=True)
-        stage_plugin_candidate(file_path, current_code, current_root)
+        stage_plugin_candidate(
+            file_path,
+            current_code,
+            current_root,
+            extra_files=extra_files,
+            deleted_files=deleted_files,
+        )
         PluginDevSandboxService._make_tree_writable_for_sandbox(current_root)
         # 主文件容器路径始终返回文件本身（包任务时 staging 入口是目录，这里换算回主文件）
         relative_file = normalize_check_relative_path(file_path)
@@ -844,14 +901,6 @@ class PluginDevSandboxService:
             return False
         client = CCSandboxClient(state, timeout=30.0)
         return await client.force_cancel_current_task(workspace_id="default")
-
-    @staticmethod
-    async def get_available_tools(*, refresh: bool = False) -> list[str]:
-        state = await PluginDevSandboxService.start()
-        client = CCSandboxClient(state, timeout=60.0)
-        if refresh:
-            return await client.refresh_tools()
-        return await client.get_tools()
 
     @staticmethod
     async def inspect_runtime(*, refresh_tools: bool = False) -> PluginDevSandboxRuntimeInfo:

@@ -230,7 +230,7 @@ cmd = "bash -c 'cd frontend && pnpm build'"
 
 [tool.poe.tasks.frontend-typecheck]
 help = "运行前端类型检查"
-cmd = "bash -c 'cd frontend && pnpm exec tsc --noEmit'"
+cmd = "bash -c 'cd frontend && pnpm exec tsc -b'"
 
 [tool.poe.tasks.frontend-lint]
 help = "运行前端 lint"
@@ -238,11 +238,11 @@ cmd = "bash -c 'cd frontend && pnpm exec eslint src/ --max-warnings 0'"
 
 [tool.poe.tasks.frontend-check]
 help = "运行前端检查（typecheck + lint）"
-cmd = "bash -c 'cd frontend && pnpm exec tsc --noEmit && pnpm exec eslint src/ --max-warnings 0'"
+cmd = "bash -c 'cd frontend && pnpm exec tsc -b && pnpm exec eslint src/ --max-warnings 0'"
 
 [tool.poe.tasks.frontend-check-full]
 help = "运行前端检查（typecheck + lint + build）"
-cmd = "bash -c 'cd frontend && pnpm exec tsc --noEmit && pnpm exec eslint src/ --max-warnings 0 && pnpm build'"
+cmd = "bash -c 'cd frontend && pnpm exec tsc -b && pnpm exec eslint src/ --max-warnings 0 && pnpm build'"
 
 [tool.poe.tasks.frontend-preview]
 help = "预览前端构建"

@@ -79,6 +79,12 @@ class GroupIncreaseNoticeHandler(BaseNoticeHandler):
         return NoticeConfig(force_tome=True, use_system_sender=True)
 
     async def is_enabled(self, db_chat_channel: DBChatChannel) -> bool:
+        from nekro_agent.adapters.onebot_v11.adapter import OnebotV11Adapter
+
+        # 兼容存量部署：适配器级旧开关仍作为总开关，频道级开关来自 effective config
+        adapter = db_chat_channel.adapter.cast(OnebotV11Adapter)
+        if not adapter.config.SESSION_GROUP_WELCOME_ENABLED:
+            return False
         effective_config = await db_chat_channel.get_effective_config()
         return effective_config.SESSION_GROUP_WELCOME_ENABLED
 
@@ -100,6 +106,12 @@ class GroupDecreaseNoticeHandler(BaseNoticeHandler):
         return NoticeConfig(force_tome=True, use_system_sender=True)
 
     async def is_enabled(self, db_chat_channel: DBChatChannel) -> bool:
+        from nekro_agent.adapters.onebot_v11.adapter import OnebotV11Adapter
+
+        # 兼容存量部署：适配器级旧开关仍作为总开关，频道级开关来自 effective config
+        adapter = db_chat_channel.adapter.cast(OnebotV11Adapter)
+        if not adapter.config.SESSION_GROUP_LEAVE_NOTICE_ENABLED:
+            return False
         effective_config = await db_chat_channel.get_effective_config()
         return effective_config.SESSION_GROUP_LEAVE_NOTICE_ENABLED
 

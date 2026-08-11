@@ -13,7 +13,6 @@ from nekro_agent.core.logger import logger
 from nekro_agent.models.db_preset import DBPreset
 from nekro_agent.schemas.chat_message import ChatType
 from nekro_agent.services.config_resolver import config_resolver
-from nekro_agent.services.plugin.collector import plugin_collector
 
 if TYPE_CHECKING:
     from nekro_agent.adapters.interface.base import BaseAdapter
@@ -158,7 +157,9 @@ class DBChatChannel(Model):
 
     async def reset_channel(self):
         """重置聊天频道"""
+        # 延迟导入：plugin.base 会导入本模块所在的 models 包，模块级导入 collector 会形成循环
         from nekro_agent.schemas.agent_ctx import AgentCtx
+        from nekro_agent.services.plugin.collector import plugin_collector
 
         self.conversation_start_time = datetime.now()  # 重置对话起始时间
         await self.save()

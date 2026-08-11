@@ -28,20 +28,11 @@ def sha256_text(content: str) -> str:
 def normalize_plugin_file_path(file_path: str) -> str:
     """将外部输入规范化为唯一的 POSIX 插件相对路径。
 
-    内部网关协议只接受规范 POSIX 路径，显式拒绝空段、`.`、`..` 与反斜杠，
-    避免同一文件通过路径别名绕过去重、插件根目录或写删冲突校验。
+    规范性校验（拒绝空段、`.`、`..`、反斜杠与绝对路径）统一由 `resolve_plugin_file`
+    承担，避免同一文件通过路径别名绕过去重、插件根目录或写删冲突校验。
     """
-    if not file_path or file_path.strip() != file_path or "\\" in file_path:
-        raise ValidationError(reason="插件文件路径必须是规范的 POSIX 相对路径")
-    parts = file_path.split("/")
-    if any(part in {"", ".", ".."} for part in parts):
-        raise ValidationError(reason="插件文件路径不能包含空目录、. 或 ..")
-    path = PurePosixPath(file_path)
-    if path.is_absolute():
-        raise ValidationError(reason="插件文件路径不能是绝对路径")
-    normalized = path.as_posix()
-    resolve_plugin_file(normalized)
-    return normalized
+    resolve_plugin_file(file_path)
+    return PurePosixPath(file_path).as_posix()
 
 
 def plugin_top_dir(file_path: str) -> str | None:
@@ -56,6 +47,10 @@ def resolve_plugin_file(file_path: str, *, must_exist: bool = False) -> Path:
     raw = Path(file_path)
     if raw.is_absolute():
         raise ValidationError(reason="插件文件路径不能是绝对路径")
+    # 必须在规范路径上校验：`a/../b.py` 这类别名 resolve 后仍落在插件根内，
+    # 但调用方按原始路径段推断包结构时会越出插件根目录。
+    if "\\" in file_path or any(part in {"", ".", ".."} for part in file_path.split("/")):
+        raise ValidationError(reason="插件文件路径不能包含空目录、. 或 ..")
     if not (file_path.endswith(".py") or file_path.endswith(".py.disabled")):
         raise ValidationError(reason="仅允许操作 .py 或 .py.disabled 插件文件")
 
@@ -78,8 +73,14 @@ def list_plugin_files() -> list[str]:
     files: list[str] = []
     for pattern in ("**/*.py", "**/*.py.disabled"):
         for item in root.glob(pattern):
-            if item.is_file():
-                files.append(item.relative_to(root).as_posix())
+            if not item.is_file():
+                continue
+            # 过滤指向插件目录外的符号链接，与 resolve_plugin_file 的越界判定保持一致
+            try:
+                item.resolve().relative_to(root)
+            except ValueError:
+                continue
+            files.append(item.relative_to(root).as_posix())
     return sorted(files)
 
 

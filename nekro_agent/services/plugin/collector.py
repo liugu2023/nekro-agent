@@ -10,6 +10,7 @@ import stat
 import sys
 import traceback
 import uuid
+from contextlib import suppress
 from datetime import datetime
 from importlib import import_module
 from pathlib import Path
@@ -160,14 +161,19 @@ class PluginCollector:
                     continue
                 if module_name in loaded_module_names:
                     logger.warning(
-                        f"跳过低优先级的重复插件 `{item}`，插件来源优先级为：内置插件 > 工作目录插件 > 云端插件",
+                        f"跳过低优先级的重复插件 `{item}`：模块名 `{module_name}` 已由更高优先级来源成功加载"
+                        "（插件来源优先级为：内置插件 > 工作目录插件 > 云端插件）",
                     )
                     continue
-                loaded_module_names.add(module_name)
                 try:
-                    await self._try_load_plugin(item, is_builtin=is_builtin, is_package=is_package)
+                    loaded = await self._try_load_plugin(item, is_builtin=is_builtin, is_package=is_package)
                 except Exception as e:
                     logger.exception(f"加载插件失败: {item}: {e}")
+                    continue
+                # 仅在加载成功后占用模块名：高优先级来源加载失败时不应连带遮蔽同名的
+                # 低优先级插件，否则该插件会在重启后静默消失
+                if loaded:
+                    loaded_module_names.add(module_name)
 
     @staticmethod
     def normalize_plugin_module_name(module_name: str) -> str:
@@ -361,7 +367,9 @@ class PluginCollector:
         if not loaded:
             return False
 
-        # 重载完成后，如果插件有路由，进行热重载
+        # 重载完成后，如果插件有路由，进行热重载。
+        # 路由是插件的可选能力：热重载失败时插件本体（沙盒方法、命令、回调）仍然可用，
+        # 因此只告警而不连带卸载整个插件——否则一个可选能力的失败会让插件从运行时整体消失。
         try:
             reloaded_plugin = self.get_plugin_by_module_name(fixed_module_name)
             if reloaded_plugin and reloaded_plugin.is_enabled:
@@ -369,14 +377,12 @@ class PluginCollector:
                     plugin_router_manager,
                 )
 
-                if not plugin_router_manager.reload_plugin_router(reloaded_plugin):
-                    await self.unload_plugin_by_module_name(fixed_module_name)
-                    return False
-                logger.info(f"插件 {reloaded_plugin.name} 路由热重载成功")
+                if plugin_router_manager.reload_plugin_router(reloaded_plugin):
+                    logger.info(f"插件 {reloaded_plugin.name} 路由热重载成功")
+                else:
+                    logger.warning(f"插件 {reloaded_plugin.name} 路由热重载失败，插件保持运行但自定义路由不可用")
         except Exception as router_error:
-            logger.exception(f"插件路由热重载失败: {router_error}")
-            await self.unload_plugin_by_module_name(fixed_module_name)
-            return False
+            logger.exception(f"插件路由热重载失败，插件保持运行但自定义路由不可用: {router_error}")
         return True
 
     async def clone_package(
@@ -408,7 +414,24 @@ class PluginCollector:
             PackageInfo(module_name=module_name, git_url=git_url, remote_id=remote_id),
         )
         if auto_load and not await self.reload_plugin_by_module_name(module_name):
-            raise RuntimeError(f"云端插件 `{module_name}` 已下载，但加载失败")
+            # 回滚已落盘的克隆产物：残留目录与 package_data 记录会让重试报
+            # 「云端插件已存在」，用户在界面上无法自行恢复
+            await self._rollback_cloned_package(module_name)
+            raise RuntimeError(f"云端插件 `{module_name}` 加载失败，已回滚本次下载")
+
+    async def _rollback_cloned_package(self, module_name: str) -> None:
+        """回滚一次失败的云端插件下载（尽力清理，不掩盖原始失败原因）"""
+        with suppress(Exception):
+            await self.unload_plugin_by_module_name(module_name, scope="package")
+        package_dir = self.packages_dir / module_name
+        if package_dir.exists():
+            try:
+                shutil.rmtree(package_dir, onerror=_remove_readonly)
+            except Exception as e:
+                logger.warning(f"回滚云端插件 `{module_name}` 目录失败: {package_dir}: {e}")
+        with suppress(ValueError):
+            self.package_data.remove_package(module_name)
+        self._remove_failed_plugin(f"{self.packages_dir.name}.{module_name}")
 
     async def update_package(self, module_name: str, auto_reload: bool = False) -> None:
         """更新云端插件
@@ -458,7 +481,11 @@ class PluginCollector:
 
         try:
             package_dir.replace(backup_dir)
-            self.package_data.remove_package(module_name)
+            # 磁盘目录是「云端插件存在」的判定依据：未登记于 package_data 的孤儿目录
+            # （add_package 写盘失败、package_data 重置或手工拷贝产生）同样必须可删除，
+            # 否则该目录永远无法通过接口清理，且每次启动仍会被加载
+            with suppress(ValueError):
+                self.package_data.remove_package(module_name)
         except Exception as e:
             logger.error(f"移出云端插件目录失败: {package_dir}: {e}")
             if backup_dir.exists() and not package_dir.exists():

@@ -43,7 +43,7 @@ import {
   Menu as MenuIcon,
 } from '@mui/icons-material'
 import PluginFileSelect from './plugin-file-select'
-import { findPluginByFile, isDisabledPluginEntry, topModuleNameOf } from './plugin-file-utils'
+import { findPluginByFile, isDisabledPluginEntry, resolvePluginEntryFile, topModuleNameOf } from './plugin-file-utils'
 import { EditorTabs } from '../../components/common/NekroTabs'
 import { Editor } from '@monaco-editor/react'
 import { pluginEditorApi, streamGenerateCode } from '../../services/api/plugin-editor'
@@ -177,12 +177,12 @@ export default function PluginsEditorPage() {
   // 使用新的通知系统
   const notification = useNotification()
   const { t } = useTranslation('plugins')
-  const selectedPluginEnabled = pluginInfo
-    ? pluginInfo.loadFailed
-      ? true
-      : pluginInfo.enabled
-    : isDisabledPluginEntry(selectedFile)
-      ? false
+  const selectedPluginEnabled = isDisabledPluginEntry(selectedFile)
+    ? false
+    : pluginInfo
+      ? pluginInfo.loadFailed
+        ? true
+        : pluginInfo.enabled
       : null
 
   // 页面初始化时加载文件列表
@@ -463,14 +463,12 @@ export default function PluginsEditorPage() {
       try {
         const content = e.target?.result as string
         await pluginEditorApi.savePluginFile(file.name, content)
-        let nextFiles = files.filter(file => file !== fileToDelete)
-        setFiles(nextFiles)
+        setFiles(current => [...new Set([...current, file.name])].sort())
         try {
-          nextFiles = await pluginEditorApi.getPluginFiles()
-          setFiles(nextFiles)
+          setFiles(await pluginEditorApi.getPluginFiles())
         } catch (refreshError) {
           const message = refreshError instanceof Error ? refreshError.message : t('editor.messages.unknownError')
-          notification.warning(`${t('editor.messages.deleteRefreshFailed')}: ${message}`)
+          notification.warning(`${t('editor.messages.loadFileListFailed')}: ${message}`)
         }
         setSelectedFile(file.name)
         notification.success(t('editor.messages.importSuccess'))
@@ -539,9 +537,9 @@ export default function PluginsEditorPage() {
         await pluginEditorApi.deletePluginFile(fileToDelete)
         notification.success(t('editor.messages.deleteSuccess'))
 
-        // 重新加载文件列表
-        const files = await pluginEditorApi.getPluginFiles()
-        setFiles(files)
+        // 重新加载文件列表，并用最新列表决定下一个选中文件
+        const nextFiles = await pluginEditorApi.getPluginFiles()
+        setFiles(nextFiles)
 
         // 如果删除的是当前选中的文件，清空编辑器并选择新的文件（如果有）
         if (fileToDelete === selectedFile) {
@@ -663,16 +661,24 @@ export default function PluginsEditorPage() {
 
     try {
       setIsLoading(true)
-      if (pluginInfo) {
+      // 选中的是 .py.disabled 入口时，用户意图是把这个文件改名启用：此时 pluginInfo 可能
+      // 匹配到同名的内置/云端插件（遮蔽场景），走运行时开关会切错插件且本地文件不会被启用。
+      // loadFailed 插件同样不能走运行时开关（后端会直接拒绝），落到文件级重命名分支。
+      const mustUseFileToggle = isDisabledPluginEntry(selectedFile)
+      if (pluginInfo && !pluginInfo.loadFailed && !mustUseFileToggle) {
         const ok = await togglePluginEnabled(pluginInfo.id, nextEnabled)
         if (!ok) {
           throw new Error(t('editor.messages.unknownError'))
         }
       } else {
-        const result = await pluginEditorApi.togglePluginFile(selectedFile)
-        setFiles(current => current.map(filePath => filePath === selectedFile ? result.file_path : filePath).sort())
-        setSelectedFile(result.file_path)
-        prevSelectedFileRef.current = result.file_path
+        // 启停作用于插件入口：选中包内普通模块时不能去改那个模块的文件名
+        const toggleTarget = resolvePluginEntryFile(selectedFile, files)
+        const result = await pluginEditorApi.togglePluginFile(toggleTarget)
+        setFiles(current => current.map(filePath => filePath === toggleTarget ? result.file_path : filePath).sort())
+        if (selectedFile === toggleTarget) {
+          setSelectedFile(result.file_path)
+          prevSelectedFileRef.current = result.file_path
+        }
         try {
           setFiles(await pluginEditorApi.getPluginFiles())
         } catch (refreshError) {

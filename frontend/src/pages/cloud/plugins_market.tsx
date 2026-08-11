@@ -1356,7 +1356,6 @@ export default function PluginsMarket() {
         onRemove={selectedPlugin?.is_local ? () => handleRemoveClick(selectedPlugin) : undefined}
         onEdit={selectedPlugin?.isOwner ? () => handleEditPlugin(selectedPlugin) : undefined}
         t={t}
-        notification={notification}
         naVersion={naVersion}
       />
 

@@ -73,10 +73,11 @@ export function buildCategoryTree<T>(
 
     let parent: KBCategoryTreeNode<T> | null = null
     let currentPath = ''
-    segments.forEach((segment, index) => {
+    // for...of 而非 forEach：回调内的赋值不会被 TS 纳入控制流分析，parent 会被收窄为 never
+    for (const [index, segment] of segments.entries()) {
       currentPath = `${currentPath}${segment}/`
       parent = ensureNode(currentPath, parent, segment, index)
-    })
+    }
 
     parent?.items.push(item)
   }

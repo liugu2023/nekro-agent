@@ -44,7 +44,6 @@ class PluginCheckReport(BaseModel):
     candidate_path: str
     runtime_data_dir: str = ""
     staged_path: str = ""
-    staged_entry_path: str = ""
     stage_mode: Literal["file", "package"] = "file"
     plugin: PluginCheckPluginInfo | None = None
     checks: list[PluginCheckItem] = Field(default_factory=list)

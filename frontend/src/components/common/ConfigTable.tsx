@@ -978,7 +978,10 @@ export default function ConfigTable({
 
   usePrompt({
     when: useCallback(
-      ({ currentLocation, nextLocation }) => {
+      ({ currentLocation, nextLocation }: {
+        currentLocation: { pathname: string; search: string }
+        nextLocation: { pathname: string; search: string }
+      }) => {
         if (!hasUnsavedChanges) {
           return false
         }
@@ -1251,7 +1254,7 @@ export default function ConfigTable({
           setEmailSendAccounts([])
           return
         }
-        const accounts = value
+        const accounts = (value as unknown[])
           .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
           .filter(item => item.SEND_ENABLED === true && typeof item.USERNAME === 'string' && item.USERNAME.trim())
           .map(item => {
@@ -1744,7 +1747,7 @@ export default function ConfigTable({
                 }}
                 onChange={e => {
                   const nextValue = e.target.value
-                  if (isSearchComposing || e.nativeEvent.isComposing) {
+                  if (isSearchComposing || (e.nativeEvent as InputEvent).isComposing) {
                     setSearchCompositionText(nextValue)
                     return
                   }

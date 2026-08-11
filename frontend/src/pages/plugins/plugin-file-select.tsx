@@ -206,15 +206,12 @@ export default function PluginFileSelect({
                   display: isExpanded ? 'flex' : 'none',
                   color: entry.isDisabled ? 'text.disabled' : 'text.primary',
                   ...(entry.isDisabled && {
-                    background: theme =>
-                      theme.palette.mode === 'dark' ? 'rgba(255, 0, 0, 0.08)' : 'rgba(255, 0, 0, 0.05)',
+                    background: theme => alpha(theme.palette.error.main, 0.06),
                     fontStyle: 'italic',
                   }),
                   '&.Mui-selected': {
-                    backgroundColor: theme =>
-                      alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.25 : 0.1),
-                    color: theme =>
-                      theme.palette.mode === 'dark' ? theme.palette.primary.light : theme.palette.primary.main,
+                    backgroundColor: theme => alpha(theme.palette.primary.main, 0.16),
+                    color: 'primary.main',
                     fontWeight: 'bold',
                   },
                 }}

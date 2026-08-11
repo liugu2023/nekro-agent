@@ -109,7 +109,7 @@ export function ServerFormDialog({
 }: {
   open: boolean; onClose: () => void; onSubmit: (server: McpServerConfig) => void
   onValidate?: (server: McpServerConfig) => Promise<McpValidationResult>
-  initial: McpServerConfig; title: string; submitLabel: string; t: (key: string) => string
+  initial: McpServerConfig; title: string; submitLabel: string; t: (key: string, options?: Record<string, unknown>) => string
   lockName?: boolean
 }) {
   const [form, setForm] = useState<McpServerConfig>(initial)
@@ -269,7 +269,7 @@ export function ServerFormDialog({
 function ValidationResultPanel({
   result, t,
 }: {
-  result: McpValidationResult; t: (key: string) => string
+  result: McpValidationResult; t: (key: string, options?: Record<string, unknown>) => string
 }) {
   if (result.ok) {
     const tools = result.tools ?? []
@@ -319,7 +319,7 @@ function ValidationResultPanel({
 export function RegistryDialog({
   open, onClose, onSelect, t,
 }: {
-  open: boolean; onClose: () => void; onSelect: (item: McpRegistryItem) => void; t: (key: string) => string
+  open: boolean; onClose: () => void; onSelect: (item: McpRegistryItem) => void; t: (key: string, options?: Record<string, unknown>) => string
 }) {
   const { data: registry, isLoading } = useQuery({ queryKey: ['mcp-registry'], queryFn: () => mcpApi.getRegistry(), enabled: open })
   const [search, setSearch] = useState('')
@@ -378,7 +378,7 @@ export interface McpServerManagerProps {
   deleteContent: (name: string) => string
   toolbarFilters?: React.ReactNode
   toolbarActions?: React.ReactNode
-  t: (key: string) => string
+  t: (key: string, options?: Record<string, unknown>) => string
 }
 
 export function McpServerManager({

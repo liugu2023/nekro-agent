@@ -39,8 +39,9 @@ from nekro_agent.services.plugin_dev.host_file_gateway import (
     sha256_text,
 )
 from nekro_agent.services.plugin_dev.sandbox import PluginDevSandboxService
-from nekro_agent.services.plugin_dev.self_check import run_plugin_self_check
+from nekro_agent.services.plugin_dev.self_check import run_plugin_self_check, summarize_plugin_check
 from nekro_agent.services.plugin_dev.tasks import (
+    TERMINAL_TASK_STATUSES,
     apply_proposal,
     cancel_task,
     create_proposal,
@@ -50,6 +51,7 @@ from nekro_agent.services.plugin_dev.tasks import (
     get_task,
     get_task_file_mtime,
     get_task_runtime_snapshot,
+    record_internal_check_result,
     rollback_plugin_file,
 )
 from nekro_agent.services.plugin_dev.versioning import get_history, get_version_info, update_version_info
@@ -59,7 +61,6 @@ from nekro_agent.services.user.perm import Role, require_role
 
 router = APIRouter(prefix="/plugin-dev", tags=["Plugin Dev"])
 internal_router = APIRouter(prefix="/internal/plugin-dev", tags=["Plugin Dev Internal"])
-_TERMINAL_TASK_STATUSES = {"waiting_apply", "applied", "failed", "cancelled"}
 _MAX_INTERNAL_PROPOSAL_BYTES = 512 * 1024
 _MAX_INTERNAL_PROPOSAL_TOTAL_BYTES = 2 * 1024 * 1024
 _MAX_INTERNAL_PROPOSAL_FILES = 32
@@ -204,7 +205,7 @@ async def create_internal_plugin_proposal(
     if len(body.content.encode("utf-8")) > _MAX_INTERNAL_PROPOSAL_BYTES:
         raise ValidationError(reason="写入提案内容过大")
     task = get_task(body.task_id)
-    if task.status in _TERMINAL_TASK_STATUSES:
+    if task.status in TERMINAL_TASK_STATUSES:
         raise ValidationError(reason=f"任务 {body.task_id} 已结束（{task.status}），不能再创建写入提案")
     normalized_path, extra_contents, deleted_files = _validate_internal_file_set(
         body.file_path, body.files, body.deleted_files
@@ -254,6 +255,14 @@ async def check_internal_plugin_candidate(
     if deleted_files:
         check_kwargs["deleted_files"] = deleted_files
     report = await run_plugin_self_check(normalized_path, body.content, **check_kwargs)
+    # 登记检查结果：任务收尾时据此判定自检是否通过，不依赖 CC 在事件流里复述命令
+    record_internal_check_result(
+        task_id=body.task_id,
+        files={normalized_path: body.content, **extra_contents},
+        deleted_files=deleted_files,
+        ok=report.ok,
+        failure="" if report.ok else summarize_plugin_check(report),
+    )
     if body.level != "static":
         report.warnings.append(f"内部网关自检固定为 static 级别，已忽略请求的 {body.level} 级别；执行型检查将在用户应用提案时进行")
     return report
@@ -373,7 +382,7 @@ async def stream_plugin_dev_task(
                 last_payload = payload
                 yield payload
 
-            if task.status in _TERMINAL_TASK_STATUSES:
+            if task.status in TERMINAL_TASK_STATUSES:
                 yield json.dumps({"type": "done", "status": task.status}, ensure_ascii=False)
                 return
             await asyncio.sleep(0.8)

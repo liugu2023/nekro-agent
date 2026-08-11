@@ -55,11 +55,13 @@ _MAX_TOOL_LOG_CONTENT_CHARS = 2000
 _MAX_TASK_LOG_ENTRIES = 500
 _TASK_LOG_TRUNCATED_MARKER = "…（早期日志已省略）"
 _STALE_TASK_STATUSES = {"pending", "running_cc", "creating_proposal"}
-_TERMINAL_TASK_STATUSES = {"waiting_apply", "applied", "failed", "cancelled"}
+# 任务终态集合；routers/plugin_dev.py 的 SSE 结束判定与内部提案拦截复用同一份定义
+TERMINAL_TASK_STATUSES = {"waiting_apply", "applied", "failed", "cancelled"}
 _MAX_GENERATE_CODE_BYTES = 512 * 1024
 _MAX_PENDING_TASKS = 3
 _TERMINAL_TASK_FILE_MAX_AGE_DAYS = 30
 _PROCESSED_PROPOSAL_MAX_AGE_DAYS = 7
+_STREAM_SAVE_MIN_INTERVAL_SECONDS = 0.5
 
 
 def get_task_runtime_snapshot() -> tuple[str | None, int]:
@@ -106,6 +108,15 @@ def _cap_task_logs(data: dict[str, Any]) -> None:
 def _save_task(task_id: str, data: dict[str, Any]) -> None:
     _cap_task_logs(data)
     _write_json(_task_path(task_id), data)
+
+
+def _save_task_throttled(task_id: str, data: dict[str, Any], last_flush: float) -> float:
+    """CC 流式热路径的节流保存：距上次落盘不足间隔时先缓冲，返回最新落盘时间。"""
+    now = time.monotonic()
+    if now - last_flush < _STREAM_SAVE_MIN_INTERVAL_SECONDS:
+        return last_flush
+    _save_task(task_id, data)
+    return now
 
 
 def _truncate_log_text(text: str, max_chars: int) -> str:
@@ -484,6 +495,42 @@ def _candidate_signature(files: dict[str, str], deleted_files: set[str] | None =
     return sha256_text(payload)
 
 
+# 内部自检网关的检查结果记录：CC 在沙盒里的每次自检最终都会 POST 到 /internal/plugin-dev/check，
+# 这里按「任务 + 候选内容签名」留档，任务收尾时据此判定自检是否通过。
+# 相比嗅探 bash 事件流中的命令行文本，这里不依赖 CC 复述命令的写法。
+_INTERNAL_CHECK_RESULTS: dict[str, tuple[bool, str]] = {}
+_MAX_INTERNAL_CHECK_RESULTS = 128
+
+
+def _internal_check_key(task_id: str, files: dict[str, str], deleted_files: set[str] | None) -> str:
+    return f"{task_id}:{_candidate_signature(files, deleted_files)}"
+
+
+def record_internal_check_result(
+    *,
+    task_id: str,
+    files: dict[str, str],
+    deleted_files: set[str] | None,
+    ok: bool,
+    failure: str,
+) -> None:
+    """登记一次内部网关自检结果（按候选内容签名，静态检查对同一内容结果确定）。"""
+    key = _internal_check_key(task_id, files, deleted_files)
+    _INTERNAL_CHECK_RESULTS.pop(key, None)
+    _INTERNAL_CHECK_RESULTS[key] = (ok, failure)
+    while len(_INTERNAL_CHECK_RESULTS) > _MAX_INTERNAL_CHECK_RESULTS:
+        _INTERNAL_CHECK_RESULTS.pop(next(iter(_INTERNAL_CHECK_RESULTS)))
+
+
+def get_internal_check_result(
+    *,
+    task_id: str,
+    files: dict[str, str],
+    deleted_files: set[str] | None,
+) -> tuple[bool, str] | None:
+    return _INTERNAL_CHECK_RESULTS.get(_internal_check_key(task_id, files, deleted_files))
+
+
 def _proposal_files_map(proposal: PluginDevProposalResponse) -> dict[str, str]:
     if proposal.files:
         return {item.file_path: item.content for item in proposal.files if item.action == "write"}
@@ -499,7 +546,8 @@ def _primary_content_from_files(files: dict[str, str], primary_file_path: str, f
     for key in (primary_file_path, normalized_primary):
         if key in files:
             return files[key]
-    return next(iter(files.values()), fallback)
+    # 主文件缺失时绝不能拿其他文件的内容顶替，交由调用方按 fallback 语义处理
+    return fallback
 
 
 def _build_plugin_dev_instruction(
@@ -584,16 +632,6 @@ def get_task(task_id: str) -> PluginDevTaskResponse:
     return _task_response(_read_json(path, {}))
 
 
-def get_task_status(task_id: str) -> str | None:
-    path = _task_path(task_id)
-    if not path.exists():
-        return None
-    try:
-        return str(_read_json(path, {}).get("status") or "") or None
-    except Exception:
-        return None
-
-
 def get_task_file_mtime(task_id: str) -> float:
     try:
         return _task_path(task_id).stat().st_mtime
@@ -608,18 +646,27 @@ def get_proposal(proposal_id: str) -> PluginDevProposalResponse:
     return PluginDevProposalResponse.model_validate(_read_json(path, {}))
 
 
-def get_latest_pending_proposal_for_task(task_id: str) -> PluginDevProposalResponse | None:
+def list_pending_proposals_for_task(task_id: str) -> list[PluginDevProposalResponse]:
+    """返回该任务的全部 pending 提案，按创建时间从新到旧排序。"""
     if not PLUGIN_DEV_PROPOSAL_DIR.exists():
-        return None
+        return []
 
     proposals: list[PluginDevProposalResponse] = []
     for path in PLUGIN_DEV_PROPOSAL_DIR.glob("proposal-*.json"):
-        proposal = PluginDevProposalResponse.model_validate(_read_json(path, {}))
+        try:
+            proposal = PluginDevProposalResponse.model_validate(_read_json(path, {}))
+        except Exception as e:
+            # 单个损坏/旧版提案文件不能拖垮所有任务的收尾流程，跳过并告警
+            logger.warning(f"跳过无法解析的插件开发提案文件: {path.name}: {e}")
+            continue
         if proposal.task_id == task_id and proposal.status == "pending":
             proposals.append(proposal)
-    if not proposals:
-        return None
-    return max(proposals, key=lambda proposal: (proposal.created_at, proposal.proposal_id))
+    return sorted(proposals, key=lambda proposal: (proposal.created_at, proposal.proposal_id), reverse=True)
+
+
+def get_latest_pending_proposal_for_task(task_id: str) -> PluginDevProposalResponse | None:
+    proposals = list_pending_proposals_for_task(task_id)
+    return proposals[0] if proposals else None
 
 
 def create_proposal(
@@ -675,12 +722,46 @@ def create_proposal(
     return proposal
 
 
+def _resolve_base_proposal_seed(
+    body: PluginDevGenerateRequest,
+    task_data: dict[str, Any],
+) -> tuple[dict[str, str] | None, set[str] | None]:
+    """在未应用的提案上继续对话时，用该提案的完整文件集播种工作副本。
+
+    只播种主文件会让提案中新增的包内文件（如 util.py）在新一轮里凭空消失，
+    CC 随后会因相对导入失败而被迫重写，上一轮的实现内容就此丢失。
+    """
+    if not body.base_proposal_id:
+        return None, None
+    try:
+        # 前端会在新任务创建后丢弃旧提案，这里不校验状态，只取其文件内容
+        proposal = get_proposal(body.base_proposal_id)
+    except Exception as e:
+        logger.warning(f"读取续话基准提案失败，将仅用主文件播种工作副本: {body.base_proposal_id}: {e}")
+        return None, None
+
+    extra_files = {path: content for path, content in _proposal_files_map(proposal).items() if path != body.file_path}
+    deleted_files = _proposal_deleted_files(proposal)
+    if extra_files or deleted_files:
+        task_data.setdefault("logs", []).append(
+            f"已用提案 {proposal.proposal_id} 的文件集播种工作副本"
+            f"（附加 {len(extra_files)} 个文件，删除 {len(deleted_files)} 个文件）",
+        )
+    return extra_files or None, deleted_files or None
+
+
 async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: str) -> None:
     task_data = _read_json(_task_path(task_id), {})
     try:
         current_code = body.current_code
         plugin_top = plugin_top_dir(body.file_path)
-        sandbox_candidate_path = PluginDevSandboxService.prepare_task_workspace(body.file_path, current_code)
+        seed_extra_files, seed_deleted_files = _resolve_base_proposal_seed(body, task_data)
+        sandbox_candidate_path = PluginDevSandboxService.prepare_task_workspace(
+            body.file_path,
+            current_code,
+            extra_files=seed_extra_files,
+            deleted_files=seed_deleted_files,
+        )
         sandbox_candidate_host_path = PluginDevSandboxService.resolve_workspace_host_path(sandbox_candidate_path)
         workspace_container_root = PluginDevSandboxService.workspace_current_container_root()
         workspace_host_root = PluginDevSandboxService.resolve_workspace_host_path(workspace_container_root)
@@ -750,12 +831,13 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
             pending_write_tool_ids: set[str] = set()
             sandbox_self_check_passed = False
             sandbox_self_check_failure = ""
+            last_stream_flush = 0.0
             async for chunk in PluginDevSandboxService.stream_generate(next_instruction):
                 if isinstance(chunk, str):
                     full_response += chunk
                     if len(full_response) % 1200 < len(chunk):
                         task_data["logs"].append(f"CC 已返回约 {len(full_response)} 字符")
-                        _save_task(task_id, task_data)
+                        last_stream_flush = _save_task_throttled(task_id, task_data, last_stream_flush)
                 elif isinstance(chunk, dict):
                     if _is_sandbox_self_check_call(chunk, self_check_command):
                         tool_use_id = _tool_use_id(chunk)
@@ -781,32 +863,40 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
                             )
                         pending_write_tool_ids.discard(_tool_use_id(chunk))
                     task_data["logs"].append(_format_cc_event_log(chunk, tool_names_by_id))
-                    _save_task(task_id, task_data)
+                    last_stream_flush = _save_task_throttled(task_id, task_data, last_stream_flush)
+
+            # 流结束后强制落盘，补写节流期间缓冲的日志
+            _save_task(task_id, task_data)
 
             candidate_source = ""
             candidate_files = {}
             candidate_deleted_files = set()
-            proposal = get_latest_pending_proposal_for_task(task_id)
-            if proposal is not None:
-                proposal_files = _proposal_files_map(proposal)
-                proposal_deleted_files = _proposal_deleted_files(proposal)
-                if _candidate_signature(proposal_files, proposal_deleted_files) in rejected_signatures:
+            # 逐个丢弃与已拒绝候选内容相同的残留提案：只丢最新一个会让更旧的提案
+            # 在后续轮次继续遮蔽工作副本里的新修复
+            proposal = None
+            for pending_proposal in list_pending_proposals_for_task(task_id):
+                pending_signature = _candidate_signature(
+                    _proposal_files_map(pending_proposal),
+                    _proposal_deleted_files(pending_proposal),
+                )
+                if pending_signature in rejected_signatures:
                     last_failure = "内部网关提案内容与已拒绝的候选代码一致，未产生新的可检查候选"
-                    _discard_failed_proposal_for_retry(proposal, reason=last_failure)
-                    task_data["logs"].append(f"已丢弃未变化的内部提案：{proposal.proposal_id}")
-                    proposal = None
-                    result_code = ""
-                else:
-                    task_data["logs"].append(f"检测到内部网关写入提案：{proposal.proposal_id}")
-                    if proposal.file_path != body.file_path:
-                        task_data["logs"].append(
-                            f"警告：提案目标文件 {proposal.file_path} 与任务目标文件 {body.file_path} 不一致，将以提案为准"
-                        )
-                    task_data["file_path"] = proposal.file_path
-                    candidate_files = proposal_files
-                    candidate_deleted_files = proposal_deleted_files
-                    result_code = _primary_content_from_files(candidate_files, proposal.file_path, proposal.result_code)
-                    candidate_source = "内部网关提案"
+                    _discard_failed_proposal_for_retry(pending_proposal, reason=last_failure)
+                    task_data["logs"].append(f"已丢弃未变化的内部提案：{pending_proposal.proposal_id}")
+                    continue
+                proposal = pending_proposal
+                break
+            if proposal is not None:
+                task_data["logs"].append(f"检测到内部网关写入提案：{proposal.proposal_id}")
+                if proposal.file_path != body.file_path:
+                    task_data["logs"].append(
+                        f"警告：提案目标文件 {proposal.file_path} 与任务目标文件 {body.file_path} 不一致，将以提案为准"
+                    )
+                task_data["file_path"] = proposal.file_path
+                candidate_files = _proposal_files_map(proposal)
+                candidate_deleted_files = _proposal_deleted_files(proposal)
+                result_code = _primary_content_from_files(candidate_files, proposal.file_path, proposal.result_code)
+                candidate_source = "内部网关提案"
             else:
                 current_tree = _snapshot_workspace_tree(workspace_host_root)
                 collected_files, deleted_files, ignored_paths, tree_changed = _collect_candidate_files(
@@ -816,7 +906,17 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
                 )
                 for ignored_path in ignored_paths[:5]:
                     task_data["logs"].append(f"警告：已忽略插件范围外的工作副本文件变更：{ignored_path}")
-                if tree_changed and collected_files and _candidate_signature(collected_files, deleted_files) not in rejected_signatures:
+                primary_present = any(
+                    key in collected_files for key in (body.file_path, _primary_candidate_path(body.file_path))
+                )
+                if tree_changed and collected_files and not primary_present:
+                    last_failure = (
+                        f"工作副本候选缺少任务主文件 {body.file_path}；不支持删除或改名任务主文件，"
+                        "请保留主文件并把最终实现写入该文件"
+                    )
+                    task_data["logs"].append(f"警告：{last_failure}")
+                    result_code = ""
+                elif tree_changed and collected_files and _candidate_signature(collected_files, deleted_files) not in rejected_signatures:
                     candidate_files = collected_files
                     candidate_deleted_files = deleted_files
                     result_code = _primary_content_from_files(candidate_files, body.file_path, "")
@@ -858,6 +958,21 @@ async def _execute_task(task_id: str, body: PluginDevGenerateRequest, summary: s
                 task_data["logs"].append("已要求 CC 使用沙盒工具提交候选代码")
                 _save_task(task_id, task_data)
                 continue
+
+            if not sandbox_self_check_passed and candidate_files:
+                # 事件流嗅探依赖 CC 逐字复用自检命令；内部网关记录的是真实执行结果，
+                # 因此以网关记录为准兜底（CC 换写法、直接 curl 网关时同样成立）
+                recorded_check = get_internal_check_result(
+                    task_id=task_id,
+                    files=candidate_files,
+                    deleted_files=candidate_deleted_files,
+                )
+                if recorded_check is not None:
+                    sandbox_self_check_passed, sandbox_self_check_failure = recorded_check
+                    task_data["logs"].append(
+                        "已按内部自检网关记录判定候选自检结果："
+                        + ("通过" if sandbox_self_check_passed else f"未通过（{sandbox_self_check_failure}）"),
+                    )
 
             if not sandbox_self_check_passed:
                 last_checked_code = result_code
@@ -1199,7 +1314,7 @@ async def _apply_proposal_unlocked(proposal_id: str) -> str:
 
 async def cancel_task(task_id: str) -> PluginDevTaskResponse:
     task = get_task(task_id)
-    if task.status not in {"pending", "running_cc", "creating_proposal"}:
+    if task.status not in _STALE_TASK_STATUSES:
         return task
 
     was_active_task = _ACTIVE_TASK_ID == task_id

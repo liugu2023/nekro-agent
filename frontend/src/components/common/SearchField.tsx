@@ -49,7 +49,7 @@ export default function SearchField({
       }}
       onChange={event => {
         const nextValue = event.target.value
-        if (isComposing || event.nativeEvent.isComposing) {
+        if (isComposing || (event.nativeEvent as InputEvent).isComposing) {
           setCompositionValue(nextValue)
           return
         }

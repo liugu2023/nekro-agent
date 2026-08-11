@@ -21,6 +21,9 @@ export interface SharedStreamSubscriber {
   onError?: (error: Error) => void
 }
 
+/** 不可通过重连恢复的流错误（如 401/404），触发后立即停止重试 */
+class FatalStreamError extends Error {}
+
 /**
  * 创建一个 EventSource 流式连接
  * @param options 配置选项
@@ -64,7 +67,21 @@ export const createEventStream = (options: StreamOptions) => {
       },
       body: body ? JSON.stringify(body) : undefined,
       openWhenHidden: false,
-      async onopen() {
+      async onopen(response) {
+        // fetch-event-source 的默认 onopen 校验会被自定义实现整体替换，
+        // 必须自行校验，否则 404/401 等 JSON 响应会被当作正常流静默结束
+        if (!response.ok) {
+          const message = `SSE 连接失败: HTTP ${response.status}`
+          // 4xx（如任务不存在、未授权）重试不可能成功，标记为致命错误停止重连
+          if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+            throw new FatalStreamError(message)
+          }
+          throw new Error(message)
+        }
+        const contentType = response.headers.get('content-type') || ''
+        if (!contentType.includes('text/event-stream')) {
+          throw new Error(`SSE 响应类型异常: ${contentType || 'unknown'}`)
+        }
         retryDelayMs = 1000
         if (isFirstOpen) {
           isFirstOpen = false
@@ -82,6 +99,10 @@ export const createEventStream = (options: StreamOptions) => {
         if (signal?.aborted || controller.signal.aborted) return
         errorReported = true
         if (onError) onError(err)
+        // onError 回调可能同步 abort（如调用方改用轮询兜底）：此时必须停止重试，
+        // 否则库会按重试延迟另起一条无人接管的连接，形成僵尸流与无限重连
+        if (signal?.aborted || controller.signal.aborted) throw err
+        if (err instanceof FatalStreamError) throw err
         if (!autoReconnect) throw err
         const currentDelay = retryDelayMs
         retryDelayMs = Math.min(retryDelayMs * 2, 5000)

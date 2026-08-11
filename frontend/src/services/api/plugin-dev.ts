@@ -48,6 +48,8 @@ export interface PluginDevGenerateRequest {
   base_code: string
   dirty: boolean
   mode?: 'proposal'
+  /** 在未应用的提案上继续对话时传入，让后端用该提案的完整文件集播种工作副本 */
+  base_proposal_id?: string
 }
 
 export interface PluginDevGenerateResponse {

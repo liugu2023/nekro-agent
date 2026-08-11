@@ -2,6 +2,7 @@
  * 主题配置管理
  * 提供主题获取和切换的核心功能
  */
+import { alpha } from '@mui/material/styles'
 import { useColorMode } from '../stores/theme'
 import { themes, ThemeConfig, ThemeKeys, getAlphaColor, getExtendedPalette } from './palette'
 import { BORDER_RADIUS } from './variants'

@@ -4,7 +4,8 @@ import { ICON_ACTION_BUTTON_VARIANTS } from '../../theme/variants'
 
 export type IconActionTone = 'subtle' | 'primary' | 'danger'
 
-interface IconActionButtonProps extends Omit<IconButtonProps, 'color'> {
+// 允许透传 MUI color（运行时本就透传给 IconButton 并生效）；新代码优先使用 tone 体系
+interface IconActionButtonProps extends IconButtonProps {
   tone?: IconActionTone
 }
 

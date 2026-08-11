@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -11,7 +12,7 @@ from pathlib import Path
 from nekro_agent.core.logger import get_sub_logger
 from nekro_agent.schemas.errors import OperationFailedError, ValidationError
 from nekro_agent.schemas.plugin_check import PluginCheckReport
-from nekro_agent.services.plugin_dev.host_file_gateway import resolve_plugin_file
+from nekro_agent.services.plugin_dev.host_file_gateway import plugin_root, resolve_plugin_file
 from nekro_agent.services.plugin_dev.paths import PLUGIN_DEV_DIR
 
 logger = get_sub_logger("plugin_dev_self_check")
@@ -54,8 +55,10 @@ def stage_plugin_candidate(
     - 包形式插件（file_path 含目录）：先拷贝真实插件目录的顶层包（若存在）提供
       完整包上下文，再覆盖写入候选文件集；入口为暂存区的顶层包目录。
     """
+    root = plugin_root()
     resolved_source = resolve_plugin_file(file_path)
-    relative_path = normalize_check_relative_path(file_path)
+    # 相对路径一律由校验后的绝对路径反推，避免直接采信调用方给的路径段
+    relative_path = normalize_check_relative_path(resolved_source.relative_to(root).as_posix())
     stage_root.mkdir(parents=True, exist_ok=True)
 
     top_dir = relative_path.parts[0] if len(relative_path.parts) > 1 else None
@@ -71,7 +74,7 @@ def stage_plugin_candidate(
             shutil.rmtree(target_top)
         else:
             target_top.unlink()
-    real_top = resolved_source.parents[len(relative_path.parts) - 2]
+    real_top = root / top_dir
     if real_top.is_dir():
         shutil.copytree(real_top, target_top, ignore=shutil.ignore_patterns(*_PLUGIN_CHECK_IGNORE_PATTERNS))
     else:
@@ -154,6 +157,14 @@ async def run_plugin_self_check(
             process.kill()
             await process.communicate()
             raise ValidationError(reason=f"插件自检超时（>{timeout_seconds}s）") from e
+        except asyncio.CancelledError:
+            # 取消任务或客户端断连时必须回收子进程：临时目录随即被删除，
+            # 遗留的检查 worker 会在无工作目录的状态下继续跑完 DB 初始化与插件加载。
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(Exception):
+                await process.communicate()
+            raise
 
         if report_file.exists():
             try:

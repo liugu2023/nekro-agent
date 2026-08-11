@@ -36,7 +36,7 @@ function applyChannelStreamEvent(
       channel_name: event.channel_name ?? next[index].channel_name,
       custom_channel_name: hasCustomChannelName ? event.custom_channel_name ?? null : next[index].custom_channel_name,
       is_active: event.is_active ?? next[index].is_active,
-      status: event.status ?? next[index].status,
+      status: (event.status ?? next[index].status) as ChannelDirectoryEntry['status'],
     }
     next.splice(index, 1)
     next.unshift(updated)
@@ -50,7 +50,7 @@ function applyChannelStreamEvent(
       channel_name: event.channel_name ?? null,
       custom_channel_name: hasCustomChannelName ? event.custom_channel_name ?? null : null,
       is_active: event.is_active ?? true,
-      status: event.status ?? 'active',
+      status: (event.status ?? 'active') as ChannelDirectoryEntry['status'],
       chat_type: '',
     })
     return next

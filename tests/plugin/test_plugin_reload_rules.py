@@ -196,10 +196,12 @@ async def test_delete_package_file_reload_rules(
     if not target_file.exists():
         target_file.write_text("VALUE = 1\n", encoding="utf-8")
     unloaded: list[str] = []
+    unload_scopes: list[str] = []
     reloaded: list[str] = []
 
-    async def fake_unload(module_name: str) -> None:
+    async def fake_unload(module_name: str, scope: str = "all") -> None:
         unloaded.append(module_name)
+        unload_scopes.append(scope)
 
     async def fake_reload(module_name: str) -> None:
         reloaded.append(module_name)
@@ -214,6 +216,8 @@ async def test_delete_package_file_reload_rules(
     assert response.ok is True
     assert not target_file.exists()
     assert unloaded == ["mypkg"]
+    # 删除工作目录文件只允许卸载本地插件，防止误卸载同名内置/云端插件
+    assert all(scope == "local" for scope in unload_scopes)
     assert reloaded == expected_reload
 
 
@@ -256,10 +260,10 @@ def test_plugin_editor_rejects_symlink_escape(tmp_path: Path, monkeypatch):
 @pytest.mark.parametrize(
     ("file_path", "expected_path", "expected_unload", "expected_reload"),
     [
-        ("solo.py", "solo.py.disabled", ["solo.py"], []),
-        ("solo.py.disabled", "solo.py", [], ["solo.py"]),
+        ("solo.py", "solo.py.disabled", ["solo"], []),
+        ("solo.py.disabled", "solo.py", ["solo"], ["solo"]),
         ("pkg/__init__.py", "pkg/__init__.py.disabled", ["pkg"], []),
-        ("pkg/__init__.py.disabled", "pkg/__init__.py", [], ["pkg"]),
+        ("pkg/__init__.py.disabled", "pkg/__init__.py", ["pkg"], ["pkg"]),
     ],
 )
 async def test_toggle_plugin_entry_file(
@@ -276,10 +280,12 @@ async def test_toggle_plugin_entry_file(
     target_file.parent.mkdir(parents=True, exist_ok=True)
     target_file.write_text("plugin = None\n", encoding="utf-8")
     unloaded: list[str] = []
+    unload_scopes: list[str] = []
     reloaded: list[str] = []
 
-    async def fake_unload(module_name: str) -> None:
+    async def fake_unload(module_name: str, scope: str = "all") -> None:
         unloaded.append(module_name)
+        unload_scopes.append(scope)
 
     async def fake_reload(module_name: str) -> None:
         reloaded.append(module_name)
@@ -295,7 +301,85 @@ async def test_toggle_plugin_entry_file(
     assert response.model_dump() == {"ok": True, "file_path": expected_path}
     assert (tmp_path / expected_path).is_file()
     assert unloaded == expected_unload
+    # 禁用工作目录文件只允许卸载本地插件，防止误卸载同名内置/云端插件
+    assert all(scope == "local" for scope in unload_scopes)
     assert reloaded == expected_reload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("file_path", "expected_path"),
+    [
+        # 包内子包入口：改名后顶层入口仍启用，必须重载顶层包，否则整个插件静默失效
+        ("pkg/sub/__init__.py", "pkg/sub/__init__.py.disabled"),
+        # 包内普通模块：允许启停，改名后同样需要重载所属插件
+        ("pkg/util.py", "pkg/util.py.disabled"),
+        ("pkg/util.py.disabled", "pkg/util.py"),
+    ],
+)
+async def test_toggle_package_internal_file_reloads_top_level_plugin(
+    tmp_path: Path,
+    monkeypatch,
+    file_path: str,
+    expected_path: str,
+):
+    from nekro_agent.routers import plugin_editor
+
+    entry_file = tmp_path / "pkg" / "__init__.py"
+    entry_file.parent.mkdir(parents=True, exist_ok=True)
+    entry_file.write_text("plugin = None\n", encoding="utf-8")
+    target_file = tmp_path / file_path
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text("value = 1\n", encoding="utf-8")
+    unloaded: list[str] = []
+    reloaded: list[str] = []
+
+    async def fake_unload(module_name: str, scope: str = "all") -> None:
+        unloaded.append(module_name)
+
+    async def fake_reload(module_name: str) -> bool:
+        reloaded.append(module_name)
+        return True
+
+    monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.setattr(plugin_editor.plugin_collector, "get_plugin_by_module_name", lambda _: SimpleNamespace())
+    monkeypatch.setattr(plugin_editor.plugin_collector, "unload_plugin_by_module_name", fake_unload)
+    monkeypatch.setattr(plugin_editor.plugin_collector, "reload_plugin_by_module_name", fake_reload)
+
+    response = await plugin_editor.toggle_plugin_file.__wrapped__(file_path, _current_user=SimpleNamespace())
+
+    assert response.model_dump() == {"ok": True, "file_path": expected_path}
+    assert (tmp_path / expected_path).is_file()
+    assert unloaded == ["pkg"]
+    assert reloaded == ["pkg"]
+
+
+@pytest.mark.asyncio
+async def test_toggle_wraps_reload_failure_and_rolls_back_rename(tmp_path: Path, monkeypatch):
+    """启用入口后重载抛错时必须回滚改名并返回 PluginLoadError，而非未包装的 500。"""
+    from nekro_agent.routers import plugin_editor
+    from nekro_agent.schemas.errors import PluginLoadError
+
+    disabled_entry = tmp_path / "pkg" / "__init__.py.disabled"
+    disabled_entry.parent.mkdir(parents=True, exist_ok=True)
+    disabled_entry.write_text("plugin = None\n", encoding="utf-8")
+
+    async def fake_reload(module_name: str) -> bool:
+        raise ValueError(f"插件 `{module_name}` 处于禁用状态")
+
+    monkeypatch.setattr(plugin_editor, "WORKDIR_PLUGIN_DIR", str(tmp_path))
+    monkeypatch.setattr(plugin_editor.plugin_collector, "get_plugin_by_module_name", lambda _: None)
+    monkeypatch.setattr(plugin_editor.plugin_collector, "unload_plugin_by_module_name", AsyncMock())
+    monkeypatch.setattr(plugin_editor.plugin_collector, "reload_plugin_by_module_name", fake_reload)
+
+    with pytest.raises(PluginLoadError):
+        await plugin_editor.toggle_plugin_file.__wrapped__(
+            "pkg/__init__.py.disabled",
+            _current_user=SimpleNamespace(),
+        )
+
+    assert disabled_entry.is_file()
+    assert not (tmp_path / "pkg" / "__init__.py").exists()
 
 
 @pytest.mark.asyncio
