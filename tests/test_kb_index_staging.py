@@ -632,6 +632,7 @@ async def test_staged_points_are_written_unsearchable_until_commit(monkeypatch: 
 
 async def test_activation_failure_leaves_document_recoverable(monkeypatch: pytest.MonkeyPatch) -> None:
     """激活失败发生在提交之后：不得抛出（否则会回滚元数据），文档留在 indexing 等待恢复重建。"""
+    monkeypatch.setattr(index_service, "_ACTIVATION_RETRY_DELAYS", ())
     qdrant, _model, document = _install_swap_harness(monkeypatch, fail_activation=True)
 
     created = await index_service._swap_document_index(
@@ -647,8 +648,59 @@ async def test_activation_failure_leaves_document_recoverable(monkeypatch: pytes
     # 状态如实停在 indexing，_recover_stale_kb_tasks 会在重启后重新入队
     assert document.sync_status == "indexing"
     assert _source_is_search_ready(document) is False  # type: ignore[arg-type]
+    assert document.last_error is not None and "激活失败" in document.last_error
     # 旧点此刻已是孤儿（行随提交删除），无论激活成败都要清理
     assert qdrant.deleted == [[11, 12]]
+
+
+async def test_activation_retries_transient_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """瞬时抖动应被重试吸收，不该让文档卡在 indexing 直到重启。"""
+    monkeypatch.setattr(index_service, "_ACTIVATION_RETRY_DELAYS", (0.0,))
+    qdrant, _model, document = _install_swap_harness(monkeypatch)
+    calls: list[int] = []
+    original_set_payload = qdrant.set_payload
+
+    async def _flaky(*, chunk_ids: list[int], payload: dict[str, object]) -> None:
+        calls.append(len(chunk_ids))
+        if len(calls) == 1:
+            raise RuntimeError("qdrant blip")
+        await original_set_payload(chunk_ids=chunk_ids, payload=payload)
+
+    qdrant.set_payload = _flaky  # type: ignore[method-assign]
+
+    await index_service._swap_document_index(
+        document,  # type: ignore[arg-type]
+        [_draft("a")],
+        [[1.0]],
+        **_swap_kwargs(document),  # type: ignore[arg-type]
+    )
+
+    assert len(calls) == 2
+    assert document.sync_status == "ready"
+    assert qdrant.activated == [([100], {"is_enabled": True})]
+
+
+async def test_rebuild_reports_failed_when_activation_did_not_land(monkeypatch: pytest.MonkeyPatch) -> None:
+    """激活失败时不得对外推 ready，否则 UI 会把不可检索的文档显示为正常。"""
+    monkeypatch.setattr(index_service, "_ACTIVATION_RETRY_DELAYS", ())
+    harness = _install_harness(monkeypatch, embedding_ok=True)
+    published: list[dict[str, object]] = []
+
+    async def _recording_progress(_document: object, **kwargs: object) -> None:
+        published.append(kwargs)
+
+    async def _swap_without_activation(*_args: object, **_kwargs: object) -> int:
+        harness.document.sync_status = "indexing"
+        harness.document.last_error = "向量点激活失败，索引暂不可用，将在重启后自动重建: boom"
+        return 5
+
+    monkeypatch.setattr(index_service, "_publish_index_progress", _recording_progress)
+    monkeypatch.setattr(index_service, "_swap_document_index", _swap_without_activation)
+
+    await index_service.rebuild_document(harness.document)  # type: ignore[arg-type]
+
+    assert published[-1]["phase"] == "failed"
+    assert "激活失败" in str(published[-1]["error_summary"])
 
 
 async def test_rollback_before_commit_leaves_no_searchable_points(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -673,8 +725,8 @@ async def test_rollback_before_commit_leaves_no_searchable_points(monkeypatch: p
 async def test_reconcile_removes_points_without_chunk_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     """硬崩溃残留的孤儿点由启动对账收敛：点在、chunk 行不在即删除。"""
     qdrant = _FakeQdrant()
-    qdrant.stored_point_ids = [11, 12, 100, 101]
-    model = _FakeChunkModel(existing_ids=[11, 12])
+    qdrant.stored_point_ids = [11, 12, 13, 14, 100, 101]
+    model = _FakeChunkModel(existing_ids=[11, 12, 13, 14])
 
     monkeypatch.setattr(index_service, "kb_qdrant_manager", qdrant)
     monkeypatch.setattr(index_service, "DBKBChunk", model)
@@ -683,3 +735,18 @@ async def test_reconcile_removes_points_without_chunk_rows(monkeypatch: pytest.M
 
     assert removed == 2
     assert [point_id for batch in qdrant.deleted for point_id in batch] == [100, 101]
+
+
+async def test_reconcile_refuses_when_most_points_look_orphaned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """collection 与当前 DB 不匹配（如多实例共用）时必须只告警不删除。"""
+    qdrant = _FakeQdrant()
+    qdrant.stored_point_ids = [11, 900, 901, 902]
+    model = _FakeChunkModel(existing_ids=[11])
+
+    monkeypatch.setattr(index_service, "kb_qdrant_manager", qdrant)
+    monkeypatch.setattr(index_service, "DBKBChunk", model)
+
+    removed = await index_service.reconcile_orphan_vector_points(batch_size=2)
+
+    assert removed == 0
+    assert qdrant.deleted == []

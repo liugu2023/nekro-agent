@@ -34,6 +34,8 @@ _INDEX_CONCURRENCY = 3
 _index_semaphore = asyncio.Semaphore(_INDEX_CONCURRENCY)
 _index_tasks: dict[int, Any] = {}
 _pending_rebuilds: set[int] = set()
+_ACTIVATION_RETRY_DELAYS = (0.5, 2.0)
+_RECONCILE_MAX_ORPHAN_RATIO = 0.5
 
 
 def _hash_text(text: str) -> str:
@@ -306,16 +308,16 @@ async def _swap_asset_index(
     # 激活失败就把资产留在 indexing，由启动恢复流程重新入队重建。
     try:
         if staged_point_ids:
-            await kb_library_qdrant_manager.set_payload(
-                chunk_ids=staged_point_ids,
-                payload={"is_enabled": asset.is_enabled},
-            )
+            await _activate_staged_points(asset, staged_point_ids)
         asset.sync_status = "ready"
         await asset.save(update_fields=["sync_status", "update_time"])
     except Exception as e:
         logger.warning(
             f"全局知识库新向量点激活失败，资产保持 indexing 等待恢复重建: asset_id={asset.id}, error={e}",
         )
+        asset.last_error = f"向量点激活失败，索引暂不可用，将在重启后自动重建: {e}"
+        with suppress(Exception):
+            await asset.save(update_fields=["last_error", "update_time"])
 
     # 旧 chunk 行已随提交删除，旧向量点此刻已是孤儿，无论激活成败都要清理
     try:
@@ -329,21 +331,52 @@ async def _swap_asset_index(
     return created_count
 
 
+async def _activate_staged_points(asset: DBKBAsset, staged_point_ids: list[int]) -> None:
+    """激活 staging 点。激活失败会让资产一直不可检索，故对瞬时故障做有限重试。"""
+    attempts = len(_ACTIVATION_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            await kb_library_qdrant_manager.set_payload(
+                chunk_ids=staged_point_ids,
+                payload={"is_enabled": asset.is_enabled},
+            )
+            return
+        except Exception as e:
+            if attempt == attempts - 1:
+                raise
+            delay = _ACTIVATION_RETRY_DELAYS[attempt]
+            logger.warning(
+                f"激活全局知识库新向量点失败，{delay}s 后重试: asset_id={asset.id}, error={e}",
+            )
+            await asyncio.sleep(delay)
+
+
 async def reconcile_orphan_asset_vector_points(*, batch_size: int = 1024) -> int:
     """删除全局知识库 Qdrant 中已无对应 chunk 行的孤儿向量点，DB 为唯一真值。
 
     注意：必须在没有进行中的索引任务时调用（启动阶段），理由同 index_service 的同名对账。
+    同样带孤儿占比保险，避免 collection 与当前数据库不匹配时误删他人数据。
     """
-    removed = 0
+    all_point_ids: list[int] = []
+    orphans: list[int] = []
     async for point_ids in kb_library_qdrant_manager.iter_point_ids(batch_size=batch_size):
+        all_point_ids.extend(point_ids)
         existing = set(await DBKBAssetChunk.filter(id__in=point_ids).values_list("id", flat=True))
-        orphans = [point_id for point_id in point_ids if point_id not in existing]
-        if orphans:
-            await kb_library_qdrant_manager.delete_chunk_points(orphans)
-            removed += len(orphans)
-    if removed:
-        logger.info(f"全局知识库向量对账完成：清理 {removed} 个无对应 chunk 行的孤儿向量点")
-    return removed
+        orphans.extend(point_id for point_id in point_ids if point_id not in existing)
+
+    if not orphans:
+        return 0
+    if len(orphans) > max(1, len(all_point_ids)) * _RECONCILE_MAX_ORPHAN_RATIO:
+        logger.error(
+            f"全局知识库向量对账中止：{len(orphans)}/{len(all_point_ids)} 个点在 DB 中无对应 chunk 行，"
+            f"疑似 Qdrant collection 与当前数据库不匹配（多实例共用？），已跳过删除",
+        )
+        return 0
+
+    for batch_start in range(0, len(orphans), batch_size):
+        await kb_library_qdrant_manager.delete_chunk_points(orphans[batch_start : batch_start + batch_size])
+    logger.info(f"全局知识库向量对账完成：清理 {len(orphans)} 个无对应 chunk 行的孤儿向量点")
+    return len(orphans)
 
 
 async def index_asset(asset: DBKBAsset) -> int:
@@ -445,16 +478,19 @@ async def rebuild_asset(asset: DBKBAsset) -> int:
         )
         raise
 
-    # 索引已生效，以下均为尽力而为的收尾，失败不得回滚状态
+    # 索引已生效，以下均为尽力而为的收尾，失败不得回滚状态。
+    # 激活失败时资产仍是 indexing / 不可检索，不能对外报 ready 掩盖问题。
+    activated = asset.sync_status == "ready"
     try:
         await _publish_index_progress(
             asset,
-            phase="ready",
+            phase="ready" if activated else "failed",
             started_at=int(datetime.now(timezone.utc).timestamp() * 1000),
             progress_percent=100,
             total_chunks=chunk_count,
             processed_chunks=chunk_count,
-            expires_in_ms=4000,
+            error_summary="" if activated else (asset.last_error or "向量点激活失败，等待恢复重建"),
+            expires_in_ms=4000 if activated else 8000,
         )
         await detect_and_sync_asset_references(asset.id)
     except Exception as e:
