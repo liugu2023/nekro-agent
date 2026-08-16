@@ -75,6 +75,27 @@ async def _init_kb_collection() -> None:
         logger.warning(f"全局知识库 Qdrant Collection 初始化失败（可能 Qdrant 未启用）: {e}")
 
 
+async def _reconcile_kb_vector_points() -> None:
+    """启动时按 DB 对账 Qdrant，清理切换过程中崩溃残留的孤儿向量点。
+
+    必须在 _recover_stale_kb_tasks 之前调用：此刻还没有任何索引任务在跑，不会把
+    「已写入 Qdrant 但 DB 事务尚未提交」的 staging 点误判成孤儿。
+    """
+    try:
+        from nekro_agent.services.kb.index_service import reconcile_orphan_vector_points
+
+        await reconcile_orphan_vector_points()
+    except Exception as e:
+        logger.warning(f"知识库向量对账失败（可能 Qdrant 未启用）: {e}")
+
+    try:
+        from nekro_agent.services.kb.library_index_service import reconcile_orphan_asset_vector_points
+
+        await reconcile_orphan_asset_vector_points()
+    except Exception as e:
+        logger.warning(f"全局知识库向量对账失败（可能 Qdrant 未启用）: {e}")
+
+
 async def _recover_stale_kb_tasks() -> None:
     """恢复因服务重启而卡在非终态的知识库文档/资产，重新调度索引。"""
     try:
@@ -183,6 +204,9 @@ if _driver is not None:
         # 初始化知识库 Collection
         await _init_kb_collection()
         logger.info("Knowledge base collection initialized")
+
+        # 对账 Qdrant 孤儿向量点（必须早于恢复任务，避免误删进行中任务的 staging 点）
+        await _reconcile_kb_vector_points()
 
         # 恢复因重启而卡在非终态的知识库索引任务
         await _recover_stale_kb_tasks()

@@ -212,11 +212,12 @@ async def _swap_asset_index(
 ) -> int:
     """两阶段切换资产索引，DB 提交是唯一的切换点。
 
-    Qdrant 写入不受 Postgres 事务保护，所以新向量点先以 is_enabled=False 写入：它们不满足
-    检索过滤条件，旧点仍是唯一可检索的一份。激活放在事务内、紧邻提交的最后一步——激活失败会
-    连同 DB 一起回滚，旧 chunk 行、旧向量点、旧规范化文本全部原样保留，旧索引继续可检索；
-    回滚时刚写入的新点由 finally 尽力清除。
-    提交之后只剩纯清理动作（删旧点、删旧文本），失败仅留残留，不影响新索引可用性。
+    Qdrant 写入不受 Postgres 事务保护，因此新向量点一律以 is_enabled=False 写入，直到 DB 提交
+    成功后才激活。这样任何崩溃点都不会留下「可检索的孤儿点」：
+      - 提交前崩溃/回滚：新点不可检索，旧 chunk 行、旧向量点、旧文本全部原样保留，旧索引照常可检索；
+      - 提交后、激活前崩溃：新点仍不可检索，资产已如实标记为 indexing，搜索侧排除它，
+        重启后由 _recover_stale_kb_tasks 重新入队重建。
+    提交之后本函数不再抛出——抛出会让 rebuild_asset 把元数据回滚到已删除的旧 chunk。
     """
     stale_chunk_ids = await list_asset_chunk_ids(asset.id)
     staged_point_ids: list[int] = []
@@ -270,12 +271,14 @@ async def _swap_asset_index(
                 staged_point_ids = [chunk.id for chunk in created_chunks]
                 created_count = len(created_chunks)
 
-            # 元数据与 chunk 行在同一事务内 flip，避免出现「新 chunk + 旧文本指针」的中间态
+            # 元数据与 chunk 行在同一事务内 flip，避免出现「新 chunk + 旧文本指针」的中间态。
+            # 此处先落 indexing：提交那一刻旧 chunk 行已删、新点尚未激活，资产确实无索引可用，
+            # 如实标记可让搜索侧排除它，也让 _recover_stale_kb_tasks 能在重启后接手。
             asset.normalized_text_path = normalized_rel_path
             asset.normalized_text_hash = normalized_text_hash
             asset.chunk_count = created_count
             asset.extract_status = "ready"
-            asset.sync_status = "ready"
+            asset.sync_status = "indexing"
             asset.last_indexed_at = datetime.now(timezone.utc)
             asset.last_error = None
             await asset.save(
@@ -291,13 +294,6 @@ async def _swap_asset_index(
                 ],
                 using_db=conn,
             )
-
-            # 提交前最后一步激活新点：失败即整体回滚，旧 chunk / 旧向量点 / 旧文本原封不动
-            if staged_point_ids:
-                await kb_library_qdrant_manager.set_payload(
-                    chunk_ids=staged_point_ids,
-                    payload={"is_enabled": asset.is_enabled},
-                )
         switched = True
     finally:
         if not switched and staged_point_ids:
@@ -306,15 +302,48 @@ async def _swap_asset_index(
             except Exception as e:
                 logger.warning(f"清理全局知识库 staging 向量点失败: asset_id={asset.id}, error={e}")
 
+    # 提交之后一律不抛出：抛出会让 rebuild_asset 误把元数据回滚到已删除的旧 chunk。
+    # 激活失败就把资产留在 indexing，由启动恢复流程重新入队重建。
+    try:
+        if staged_point_ids:
+            await kb_library_qdrant_manager.set_payload(
+                chunk_ids=staged_point_ids,
+                payload={"is_enabled": asset.is_enabled},
+            )
+        asset.sync_status = "ready"
+        await asset.save(update_fields=["sync_status", "update_time"])
+    except Exception as e:
+        logger.warning(
+            f"全局知识库新向量点激活失败，资产保持 indexing 等待恢复重建: asset_id={asset.id}, error={e}",
+        )
+
+    # 旧 chunk 行已随提交删除，旧向量点此刻已是孤儿，无论激活成败都要清理
     try:
         await delete_asset_vector_points(stale_chunk_ids)
     except Exception as e:
-        logger.warning(f"清理全局知识库旧向量点失败（不影响新索引可用性）: asset_id={asset.id}, error={e}")
+        logger.warning(f"清理全局知识库旧向量点失败，将由启动对账收敛: asset_id={asset.id}, error={e}")
     if snapshot.normalized_text_path and snapshot.normalized_text_path != normalized_rel_path:
         with suppress(ValueError):
             _discard_normalized_text(resolve_kb_library_normalized_path(snapshot.normalized_text_path))
 
     return created_count
+
+
+async def reconcile_orphan_asset_vector_points(*, batch_size: int = 1024) -> int:
+    """删除全局知识库 Qdrant 中已无对应 chunk 行的孤儿向量点，DB 为唯一真值。
+
+    注意：必须在没有进行中的索引任务时调用（启动阶段），理由同 index_service 的同名对账。
+    """
+    removed = 0
+    async for point_ids in kb_library_qdrant_manager.iter_point_ids(batch_size=batch_size):
+        existing = set(await DBKBAssetChunk.filter(id__in=point_ids).values_list("id", flat=True))
+        orphans = [point_id for point_id in point_ids if point_id not in existing]
+        if orphans:
+            await kb_library_qdrant_manager.delete_chunk_points(orphans)
+            removed += len(orphans)
+    if removed:
+        logger.info(f"全局知识库向量对账完成：清理 {removed} 个无对应 chunk 行的孤儿向量点")
+    return removed
 
 
 async def index_asset(asset: DBKBAsset) -> int:

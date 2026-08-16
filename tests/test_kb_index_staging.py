@@ -8,6 +8,7 @@
 import asyncio
 import hashlib
 import tempfile
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -469,6 +470,7 @@ class _FakeQdrant:
         self.upserted: list[tuple[int, list[float], dict[str, object]]] = []
         self.activated: list[tuple[list[int], dict[str, object]]] = []
         self.deleted: list[list[int]] = []
+        self.stored_point_ids: list[int] = []
 
     async def batch_upsert(self, points: list[tuple[int, list[float], dict[str, object]]]) -> int:
         self.upserted.extend(points)
@@ -481,6 +483,10 @@ class _FakeQdrant:
 
     async def delete_chunk_points(self, chunk_ids: list[int]) -> None:
         self.deleted.append(list(chunk_ids))
+
+    async def iter_point_ids(self, *, batch_size: int = 1024) -> AsyncIterator[list[int]]:
+        for start in range(0, len(self.stored_point_ids), batch_size):
+            yield self.stored_point_ids[start : start + batch_size]
 
 
 class _FakeChunk:
@@ -606,8 +612,8 @@ def _swap_kwargs(document: _FakeDocument) -> dict[str, object]:
     }
 
 
-async def test_staged_points_are_written_unsearchable_before_activation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """upsert 时新点必须 is_enabled=False，提交前才被激活成文档自身的可见性。"""
+async def test_staged_points_are_written_unsearchable_until_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """upsert 时新点必须 is_enabled=False，DB 提交成功之后才被激活。"""
     qdrant, _model, document = _install_swap_harness(monkeypatch)
 
     created = await index_service._swap_document_index(
@@ -620,32 +626,33 @@ async def test_staged_points_are_written_unsearchable_before_activation(monkeypa
     assert created == 2
     assert [payload["is_enabled"] for _id, _vec, payload in qdrant.upserted] == [False, False]
     assert qdrant.activated == [([100, 101], {"is_enabled": True})]
-    # 旧点只在提交成功之后才清理
+    assert qdrant.deleted == [[11, 12]]
+    assert document.sync_status == "ready"
+
+
+async def test_activation_failure_leaves_document_recoverable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """激活失败发生在提交之后：不得抛出（否则会回滚元数据），文档留在 indexing 等待恢复重建。"""
+    qdrant, _model, document = _install_swap_harness(monkeypatch, fail_activation=True)
+
+    created = await index_service._swap_document_index(
+        document,  # type: ignore[arg-type]
+        [_draft("a"), _draft("bb")],
+        [[1.0], [2.0]],
+        **_swap_kwargs(document),  # type: ignore[arg-type]
+    )
+
+    assert created == 2
+    # 新点始终不可检索，不会污染 grouped search
+    assert all(payload["is_enabled"] is False for _id, _vec, payload in qdrant.upserted)
+    # 状态如实停在 indexing，_recover_stale_kb_tasks 会在重启后重新入队
+    assert document.sync_status == "indexing"
+    assert _source_is_search_ready(document) is False  # type: ignore[arg-type]
+    # 旧点此刻已是孤儿（行随提交删除），无论激活成败都要清理
     assert qdrant.deleted == [[11, 12]]
 
 
-async def test_activation_failure_keeps_old_index_intact(monkeypatch: pytest.MonkeyPatch) -> None:
-    """set_payload 抛错必须整体回滚：旧 chunk 行与旧向量点都还在，旧索引仍可检索。"""
-    qdrant, model, document = _install_swap_harness(monkeypatch, fail_activation=True)
-
-    with pytest.raises(RuntimeError, match="qdrant activation down"):
-        await index_service._swap_document_index(
-            document,  # type: ignore[arg-type]
-            [_draft("a"), _draft("bb")],
-            [[1.0], [2.0]],
-            **_swap_kwargs(document),  # type: ignore[arg-type]
-        )
-
-    # 旧 chunk 行随事务回滚，旧向量点绝不能被删除——两者齐全才谈得上仍可检索
-    assert [row.id for row in model.rows] == [11, 12]
-    assert [11, 12] not in qdrant.deleted
-    # 新点从未变成可检索，并且已被清理
-    assert all(payload["is_enabled"] is False for _id, _vec, payload in qdrant.upserted)
-    assert qdrant.deleted == [[100, 101]]
-
-
-async def test_rollback_after_upsert_leaves_no_searchable_orphan_points(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Qdrant upsert 成功后 DB commit 失败：新点必须被清理，旧点与旧行保留。"""
+async def test_rollback_before_commit_leaves_no_searchable_points(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Qdrant upsert 成功后 DB commit 失败：新点从未激活，且被清理；旧点与旧行保留。"""
     qdrant, model, document = _install_swap_harness(monkeypatch, fail_commit=True)
 
     with pytest.raises(RuntimeError, match="commit failed"):
@@ -656,6 +663,23 @@ async def test_rollback_after_upsert_leaves_no_searchable_orphan_points(monkeypa
             **_swap_kwargs(document),  # type: ignore[arg-type]
         )
 
+    assert all(payload["is_enabled"] is False for _id, _vec, payload in qdrant.upserted)
+    assert qdrant.activated == []
     assert [row.id for row in model.rows] == [11, 12]
     assert [11, 12] not in qdrant.deleted
     assert qdrant.deleted == [[100, 101]]
+
+
+async def test_reconcile_removes_points_without_chunk_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """硬崩溃残留的孤儿点由启动对账收敛：点在、chunk 行不在即删除。"""
+    qdrant = _FakeQdrant()
+    qdrant.stored_point_ids = [11, 12, 100, 101]
+    model = _FakeChunkModel(existing_ids=[11, 12])
+
+    monkeypatch.setattr(index_service, "kb_qdrant_manager", qdrant)
+    monkeypatch.setattr(index_service, "DBKBChunk", model)
+
+    removed = await index_service.reconcile_orphan_vector_points(batch_size=3)
+
+    assert removed == 2
+    assert [point_id for batch in qdrant.deleted for point_id in batch] == [100, 101]

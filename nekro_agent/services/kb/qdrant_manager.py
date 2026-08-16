@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from collections import defaultdict
+from collections.abc import AsyncIterator
 from typing import Any
 
 from qdrant_client import models as qdrant_models
@@ -305,6 +306,28 @@ class KBQdrantManager:
             collection_name=self.collection_name,
             points_selector=qdrant_models.PointIdsList(points=chunk_ids),
         )
+
+    async def iter_point_ids(self, *, batch_size: int = 1024) -> AsyncIterator[list[int]]:
+        """分批遍历 collection 内所有点 id，仅用于与 DB 对账，不取 payload / 向量。"""
+        client = await get_qdrant_client()
+        if client is None:
+            return
+        offset: Any = None
+        while True:
+            points, offset = await client.scroll(
+                collection_name=self.collection_name,
+                limit=batch_size,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            batch = [
+                point_id for point in points if (point_id := self._coerce_int(self._read_value(point, "id"))) is not None
+            ]
+            if batch:
+                yield batch
+            if offset is None:
+                break
 
 
 kb_qdrant_manager = KBQdrantManager()
